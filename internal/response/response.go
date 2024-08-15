@@ -10,6 +10,7 @@ import (
 
 type Response struct {
 	header             http.Header
+	body               []byte
 	connection         net.Conn
 	headerWritten      bool
 	preventFutureReads bool
@@ -33,44 +34,50 @@ func (r *Response) Header() http.Header {
 }
 
 func (r *Response) Write(data []byte) (int, error) {
-	var length int
-	if len(data) < 512 {
-		length = len(data)
-	} else {
-		length = 512
-	}
-
-	if r.Header().Get("Content-Type") == "" {
-		r.Header().Set("Content-Type", http.DetectContentType(data[:length]))
-	}
-	if len(data) < CONTENTSIZEMIN {
-		r.header.Set("Content-Length", strconv.Itoa(len(data)))
-	}
 	if !r.headerWritten {
+		length := min(len(data), 512)
+
+		if r.Header().Get("Content-Type") == "" {
+			r.Header().Set("Content-Type", http.DetectContentType(data[:length]))
+		}
+		if len(data) < CONTENTSIZEMIN {
+			r.header.Set("Content-Length", strconv.Itoa(len(data)))
+		}
+
 		r.WriteHeader(http.StatusOK)
 	}
 
 	r.preventFutureReads = true
+	fmt.Println(fmt.Sprintf("\nData: %s", string(data)))
+	r.body = append(r.body, data...)
 	wrote, err := r.connection.Write(data)
 	if err != nil {
 		return 0, err
 	}
+	fmt.Printf("Wrote: %d bytes\n\n", wrote)
 
 	return wrote, nil
 }
 
 func (r *Response) WriteHeader(statusCode int) {
-	if statusCode < 100 || statusCode >= 600 {
+	if statusCode < 100 || statusCode >= 600 || r.headerWritten {
 		return
 	}
 
-	_, err := r.connection.Write([]byte(fmt.Sprintf("HTTP/1.1 %d %s\r\n", statusCode, http.StatusText(statusCode))))
+	fmt.Println("Writing response header...")
+
+	var responseLine = fmt.Sprintf("HTTP/1.1 %d %s\r\n", statusCode, http.StatusText(statusCode))
+	fmt.Print(responseLine)
+	// Check if wrote correct
+	_, err := r.connection.Write([]byte(responseLine))
 	if err != nil {
 		return
 	}
 
 	for key, values := range r.header {
-		_, err := r.connection.Write([]byte(fmt.Sprintf("%s: %s\r\n", key, strings.Join(values, ", "))))
+		headerEntry := fmt.Sprintf("%s: %s\r\n", key, strings.Join(values, ", "))
+		fmt.Print(headerEntry)
+		_, err := r.connection.Write([]byte(headerEntry))
 		if err != nil {
 			return
 		}

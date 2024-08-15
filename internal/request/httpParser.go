@@ -28,6 +28,8 @@ func parseStartLine(scanner *bufio.Scanner, req *http.Request) error {
 	req.Method = splitStartLine[0]
 
 	uri := splitStartLine[1]
+	req.RequestURI = uri
+
 	u, err := url.ParseRequestURI(uri)
 	if err != nil {
 		return fmt.Errorf("error parsing start-line uri: %v", err)
@@ -39,7 +41,7 @@ func parseStartLine(scanner *bufio.Scanner, req *http.Request) error {
 	if version[:5] != "HTTP/" {
 		return fmt.Errorf("proto format error: %v", version)
 	}
-	if len(version) != len("HTTP/x.x") && len(version) != len("HTTP/x") {
+	if len(version) != len("HTTP/x.x") {
 		return fmt.Errorf("proto format error: %v", version)
 	}
 
@@ -52,6 +54,9 @@ func parseStartLine(scanner *bufio.Scanner, req *http.Request) error {
 	if err != nil {
 		return fmt.Errorf("proto format error: %v", err)
 	}
+	if string(version[len(version)-2]) != "." {
+		return fmt.Errorf("proto format error: %v", version)
+	}
 
 	req.ProtoMinor = protoMinor
 	req.ProtoMajor = protoMajor
@@ -61,7 +66,6 @@ func parseStartLine(scanner *bufio.Scanner, req *http.Request) error {
 
 func parseHeader(scanner *bufio.Scanner, req *http.Request) error {
 	header := make(http.Header)
-	recurringNewLines := 0
 
 	for {
 		if !scanner.Scan() {
@@ -69,14 +73,8 @@ func parseHeader(scanner *bufio.Scanner, req *http.Request) error {
 		}
 
 		if scanner.Text() == "" {
-			recurringNewLines++
-			if recurringNewLines >= 2 {
-				break
-			}
-			continue
+			break
 		}
-
-		recurringNewLines = 0
 
 		// Get key value pairs
 		key, value, found := strings.Cut(scanner.Text(), ":")
@@ -90,8 +88,6 @@ func parseHeader(scanner *bufio.Scanner, req *http.Request) error {
 		for _, v := range values {
 			header.Add(key, strings.TrimSpace(v))
 		}
-
-		recurringNewLines++
 	}
 
 	req.Header = header
@@ -104,10 +100,7 @@ func parseBody(scanner *bufio.Scanner, req *http.Request) error {
 
 	req.TransferEncoding = req.Header.Values("Transfer-Encoding")
 
-	req.RequestURI = req.URL.RequestURI()
-
-	req.RemoteAddr = req.Header.Get("X-Forwarded-For")
-
+	// Checking for empty body
 	contentLengthString := req.Header.Get("Content-Length")
 	if contentLengthString == "" {
 		return nil
@@ -120,9 +113,9 @@ func parseBody(scanner *bufio.Scanner, req *http.Request) error {
 	req.ContentLength = contentLength
 
 	var bodyContentBuffer bytes.Buffer
-	for scanner.Scan() {
-		bodyContentBuffer.WriteString(scanner.Text())
-	}
+	scanner.Scan()
+	bodyContentBuffer.WriteString(scanner.Text())
+
 	req.Body = io.NopCloser(io.LimitReader(strings.NewReader(bodyContentBuffer.String()), contentLength))
 
 	return nil
@@ -130,10 +123,13 @@ func parseBody(scanner *bufio.Scanner, req *http.Request) error {
 
 /****** end of HTTP1.1 ******/
 
-func HttpRequestParser(reader io.Reader) (*http.Request, error) {
+func Parser(reader io.Reader) (*http.Request, error) {
 	r := http.Request{}
 	parsingBody := false
 	scanner := bufio.NewScanner(reader)
+
+	// The split function gets change in between parseHeader and parseBody because when parsing the Body, the whole
+	// content should get returned by the scanner instead of each line separately
 	scanner.Split(func(data []byte, atEOF bool) (advance int, token []byte, err error) {
 		if !parsingBody {
 			return bufio.ScanLines(data, atEOF)
@@ -156,11 +152,6 @@ func HttpRequestParser(reader io.Reader) (*http.Request, error) {
 	err = parseBody(scanner, &r)
 	if err != nil {
 		return nil, err
-	}
-
-	err = r.ParseForm()
-	if err != nil {
-		return nil, fmt.Errorf("error parsing form: %v", err)
 	}
 	/****** end of HTTP1.1 ******/
 
