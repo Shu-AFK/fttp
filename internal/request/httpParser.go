@@ -113,8 +113,15 @@ func parseBody(scanner *bufio.Scanner, req *http.Request) error {
 	req.ContentLength = contentLength
 
 	var bodyContentBuffer bytes.Buffer
-	scanner.Scan()
-	bodyContentBuffer.WriteString(scanner.Text())
+	contentWrote := 0
+	for contentWrote < int(contentLength) {
+		scanner.Scan()
+		wrote, err := bodyContentBuffer.WriteString(scanner.Text())
+		if err != nil {
+			return fmt.Errorf("error parsing body content: %v", err)
+		}
+		contentWrote += wrote
+	}
 
 	req.Body = io.NopCloser(io.LimitReader(strings.NewReader(bodyContentBuffer.String()), contentLength))
 

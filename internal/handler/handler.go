@@ -2,13 +2,121 @@
 
 package handler
 
-import "net/http"
+import (
+	"bufio"
+	"bytes"
+	"fmt"
+	"github.com/go-chi/chi/v5"
+	httpRequest "httpServer/internal/request"
+	httpResponse "httpServer/internal/response"
+	"net"
+	"net/http"
+)
 
-type Handler func(http.ResponseWriter, *http.Request) error
+var notes = make(map[string]string)
 
-func (h Handler) ServeHTTP(resp http.ResponseWriter, req *http.Request) {
-	if err := h(resp, req); err != nil {
-		resp.WriteHeader(http.StatusInternalServerError)
-		_, err = resp.Write([]byte("error"))
+func PutNote(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+
+	scanner := bufio.NewScanner(r.Body)
+	scanner.Split(func(data []byte, atEOF bool) (advance int, token []byte, err error) {
+		return len(data), data, nil
+	})
+
+	contentRead := 0
+	var bodyBuffer bytes.Buffer
+	for scanner.Scan() && contentRead < int(r.ContentLength) {
+		read, err := bodyBuffer.WriteString(scanner.Text())
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Println(fmt.Sprintf("[PUT] error reading note %s: %s", id, err))
+			return
+		}
+
+		contentRead += read
 	}
+
+	notes[id] = bodyBuffer.String()
+	w.WriteHeader(http.StatusCreated)
+}
+
+func DeleteNote(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	delete(notes, id)
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func GetNotes(w http.ResponseWriter, r *http.Request) {
+	if len(notes) != 0 {
+		var notesContent string
+
+		for k, v := range notes {
+			notesContent += fmt.Sprintf("%s -> %s\n\n", k, v)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, err := w.Write([]byte(notesContent))
+		if err != nil {
+			fmt.Printf("[GET] Response writer failed with: %s", err)
+		}
+
+	} else {
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+func GetNoteById(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	note, ok := notes[id]
+
+	if !ok {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	_, err := w.Write([]byte(note))
+	if err != nil {
+		fmt.Printf("[GET BY ID] Response writer failed with: %s", err)
+		return
+	}
+}
+
+func NotFoundHandler(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotFound)
+	_, err := w.Write([]byte("Not Found"))
+	if err != nil {
+		fmt.Printf("[NOT FOUND HANDLER] Response writer failed with: %s\n", err)
+	}
+}
+
+func MethodNotAllowedHandler(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusMethodNotAllowed)
+	_, err := w.Write([]byte("Method Not Allowed"))
+	if err != nil {
+		fmt.Printf("[METHOD NOT ALLOWED HANDLER] Response writer failed with: %s\n", err)
+	}
+}
+
+func HandleAccept(conn net.Conn, r chi.Router) {
+	defer func(conn net.Conn) {
+		err := conn.Close()
+		if err != nil {
+			fmt.Println("Error closing connection")
+		}
+	}(conn)
+
+	req, err := httpRequest.Parser(conn)
+	if err != nil {
+		fmt.Printf("failed to parse request: %v\n", err)
+		return
+	}
+
+	fmt.Printf("new connection from %v\n", conn.RemoteAddr())
+	req.RemoteAddr = conn.RemoteAddr().String()
+
+	responseWriter := httpResponse.NewResponse(conn)
+	r.ServeHTTP(responseWriter, req)
+
+	fmt.Printf("handled connection from %v\n", conn.RemoteAddr())
 }

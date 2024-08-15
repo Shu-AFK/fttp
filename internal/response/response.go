@@ -48,13 +48,11 @@ func (r *Response) Write(data []byte) (int, error) {
 	}
 
 	r.preventFutureReads = true
-	fmt.Println(fmt.Sprintf("\nData: %s", string(data)))
 	r.body = append(r.body, data...)
 	wrote, err := r.connection.Write(data)
 	if err != nil {
 		return 0, err
 	}
-	fmt.Printf("Wrote: %d bytes\n\n", wrote)
 
 	return wrote, nil
 }
@@ -64,10 +62,7 @@ func (r *Response) WriteHeader(statusCode int) {
 		return
 	}
 
-	fmt.Println("Writing response header...")
-
 	var responseLine = fmt.Sprintf("HTTP/1.1 %d %s\r\n", statusCode, http.StatusText(statusCode))
-	fmt.Print(responseLine)
 	// Check if wrote correct
 	_, err := r.connection.Write([]byte(responseLine))
 	if err != nil {
