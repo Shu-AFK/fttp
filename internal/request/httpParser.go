@@ -1,8 +1,9 @@
+// TODO: fix openssl s_client -connect localhost:8080 -crlf <req.data
+
 package httpRequest
 
 import (
 	"bufio"
-	"bytes"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,12 +13,10 @@ import (
 )
 
 /****** HTTP1.1 ******/
-func parseStartLine(scanner *bufio.Scanner, req *http.Request) error {
-	var startLine string
-	if scanner.Scan() {
-		startLine = scanner.Text()
-	} else {
-		return fmt.Errorf("can't scan start-line: %v", scanner.Err())
+func parseStartLine(reader *bufio.Reader, req *http.Request) error {
+	startLine, err := reader.ReadString('\n')
+	if err != nil {
+		return fmt.Errorf("can't scan start-line: %v", err)
 	}
 
 	splitStartLine := strings.Split(startLine, " ")
@@ -36,7 +35,7 @@ func parseStartLine(scanner *bufio.Scanner, req *http.Request) error {
 	}
 	req.URL = u
 
-	version := splitStartLine[2]
+	version := strings.Trim(splitStartLine[2], "\r\n")
 
 	if version[:5] != "HTTP/" {
 		return fmt.Errorf("proto format error: %v", version)
@@ -64,22 +63,25 @@ func parseStartLine(scanner *bufio.Scanner, req *http.Request) error {
 	return nil
 }
 
-func parseHeader(scanner *bufio.Scanner, req *http.Request) error {
+func readHeader(reader *bufio.Reader) (http.Header, error) {
 	header := make(http.Header)
 
 	for {
-		if !scanner.Scan() {
-			return fmt.Errorf("can't scan header: %v", scanner.Err())
+		row, err := reader.ReadString('\n')
+		if err != nil {
+			return nil, fmt.Errorf("can't scan header: %v", err)
 		}
+		row = strings.Trim(row, "\r\n")
 
-		if scanner.Text() == "" {
+		if row == "" {
 			break
 		}
 
 		// Get key value pairs
-		key, value, found := strings.Cut(scanner.Text(), ":")
+		key, value, found := strings.Cut(row, ":")
 		if !found {
-			return fmt.Errorf("header seperator not found: %v", scanner.Text())
+			fmt.Println(header)
+			return nil, fmt.Errorf("header seperator not found: %q", row)
 		}
 
 		// Split up after each comma for header insertion
@@ -90,40 +92,122 @@ func parseHeader(scanner *bufio.Scanner, req *http.Request) error {
 		}
 	}
 
+	return header, nil
+}
+
+func parseHeader(reader *bufio.Reader, req *http.Request) error {
+	header, err := readHeader(bufio.NewReader(reader))
+	if err != nil {
+		fmt.Println(req)
+		return err
+	}
+
 	req.Header = header
 	return nil
 }
 
-func parseBody(scanner *bufio.Scanner, req *http.Request) error {
+func parseBody(reader *bufio.Reader, req *http.Request) error {
 	req.Host = req.Header.Get("Host")
 	req.Header.Del("Host")
 
 	req.TransferEncoding = req.Header.Values("Transfer-Encoding")
 
-	// Checking for empty body
 	contentLengthString := req.Header.Get("Content-Length")
-	if contentLengthString == "" {
+	contentLength, err := strconv.ParseInt(contentLengthString, 10, 64)
+
+	// Checking if chunked transfer-encoded
+	// Chunked transfer encoding overwrites the content-length header
+	// TODO: FIX
+	/* curl -X PUT -w '\n' -v -k https://127.0.0.1:8080/v1/notes/Hello-World \                                                                           ░▒▓ 52 х │ 15:20:40 ▓▒░
+	-H "Transfer-Encoding: chunked" \
+	--data @- << EOF
+	5
+	hello
+	5
+	world
+	0
+	EOF */
+	chunked := false
+	for _, encoding := range req.TransferEncoding {
+		if strings.ToLower(encoding) == "chunked" {
+			chunked = true
+		}
+	}
+
+	if chunked && req.TransferEncoding[len(req.TransferEncoding)-1] != "chunked" {
+		return fmt.Errorf("chunked encoding was not at the end of the transfer encodings")
+	}
+
+	if chunked {
+		if req.ContentLength != 0 {
+			delete(req.Header, "Content-Length")
+			req.ContentLength = 0
+		}
+
+		bodyContentBuffer := ""
+
+		// Respect \n
+		for {
+			chunkSizeStr, err := reader.ReadString('\n')
+			if err != nil {
+				return fmt.Errorf("can't read chunk size: %v", err)
+			}
+
+			chunkSizeStr = strings.Trim(chunkSizeStr, "\r\n")
+
+			// Disregard any chunk extensions
+			chunkSizeCut, _, found := strings.Cut(chunkSizeStr, ";")
+			if found {
+				chunkSizeStr = chunkSizeCut
+			}
+
+			chunkSize, err := strconv.ParseInt(chunkSizeStr, 10, 64)
+			if err != nil {
+				return fmt.Errorf("can't read chunk size: %v", err)
+			}
+
+			if chunkSize == 0 {
+				break
+			}
+
+			buffer, err := io.ReadAll(io.LimitReader(reader, chunkSize))
+			if err != nil {
+				return fmt.Errorf("can't read chunk content: %v", err)
+			}
+
+			bodyContentBuffer += string(buffer)
+		}
+		readString, err := reader.ReadString('\n')
+		if err != nil {
+			return fmt.Errorf("can't read empty line after chunk content: %v", err)
+		}
+
+		// Chunked encoding ends with an empty line
+		if strings.Trim(readString, "\r\n") == "" {
+			return nil
+		}
+
+		// If the line is not empty, a trailer section is present
+		trailer, err := readHeader(reader)
+		req.Trailer = trailer
+	}
+
+	// Checking if body got sent at once
+	if contentLengthString != "" {
+		if err != nil {
+			return fmt.Errorf("error parsing Content-Length: %v", err)
+		}
+		req.ContentLength = contentLength
+
+		bodyContentBuffer, err := io.ReadAll(io.LimitReader(reader, contentLength))
+		if err != nil {
+			return fmt.Errorf("error reading body content: %v", err)
+		}
+
+		req.Body = io.NopCloser(io.LimitReader(strings.NewReader(string(bodyContentBuffer)), contentLength))
+
 		return nil
 	}
-
-	contentLength, err := strconv.ParseInt(contentLengthString, 10, 64)
-	if err != nil {
-		return fmt.Errorf("error parsing Content-Length: %v", err)
-	}
-	req.ContentLength = contentLength
-
-	var bodyContentBuffer bytes.Buffer
-	contentWrote := 0
-	for contentWrote < int(contentLength) {
-		scanner.Scan()
-		wrote, err := bodyContentBuffer.WriteString(scanner.Text())
-		if err != nil {
-			return fmt.Errorf("error parsing body content: %v", err)
-		}
-		contentWrote += wrote
-	}
-
-	req.Body = io.NopCloser(io.LimitReader(strings.NewReader(bodyContentBuffer.String()), contentLength))
 
 	return nil
 }
@@ -132,31 +216,20 @@ func parseBody(scanner *bufio.Scanner, req *http.Request) error {
 
 func Parser(reader io.Reader) (*http.Request, error) {
 	r := http.Request{}
-	parsingBody := false
-	scanner := bufio.NewScanner(reader)
-
-	// The split function gets change in between parseHeader and parseBody because when parsing the Body, the whole
-	// content should get returned by the scanner instead of each line separately
-	scanner.Split(func(data []byte, atEOF bool) (advance int, token []byte, err error) {
-		if !parsingBody {
-			return bufio.ScanLines(data, atEOF)
-		}
-		return len(data), data, nil
-	})
+	iReader := bufio.NewReader(reader)
 
 	/****** HTTP1.1 ******/
-	err := parseStartLine(scanner, &r)
+	err := parseStartLine(iReader, &r)
 	if err != nil {
 		return nil, err
 	}
 
-	err = parseHeader(scanner, &r)
+	err = parseHeader(iReader, &r)
 	if err != nil {
 		return nil, err
 	}
 
-	parsingBody = true
-	err = parseBody(scanner, &r)
+	err = parseBody(iReader, &r)
 	if err != nil {
 		return nil, err
 	}

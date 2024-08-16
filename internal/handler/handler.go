@@ -4,11 +4,11 @@ package handler
 
 import (
 	"bufio"
-	"bytes"
 	"fmt"
 	"github.com/go-chi/chi/v5"
 	httpRequest "httpServer/internal/request"
 	httpResponse "httpServer/internal/response"
+	"io"
 	"net"
 	"net/http"
 )
@@ -18,25 +18,14 @@ var notes = make(map[string]string)
 func PutNote(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
-	scanner := bufio.NewScanner(r.Body)
-	scanner.Split(func(data []byte, atEOF bool) (advance int, token []byte, err error) {
-		return len(data), data, nil
-	})
+	bodyReader := bufio.NewReader(r.Body)
 
-	contentRead := 0
-	var bodyBuffer bytes.Buffer
-	for scanner.Scan() && contentRead < int(r.ContentLength) {
-		read, err := bodyBuffer.WriteString(scanner.Text())
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			fmt.Println(fmt.Sprintf("[PUT] error reading note %s: %s", id, err))
-			return
-		}
-
-		contentRead += read
+	bodyBuffer, err := io.ReadAll(bodyReader)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
 	}
 
-	notes[id] = bodyBuffer.String()
+	notes[id] = string(bodyBuffer)
 	w.WriteHeader(http.StatusCreated)
 }
 
@@ -106,8 +95,12 @@ func HandleAccept(conn net.Conn, r chi.Router) {
 		}
 	}(conn)
 
+	sendBadRequest := false
 	req, err := httpRequest.Parser(conn)
 	if err != nil {
+		if err.Error() == "chunked encoding was not at the end of the transfer encodings" {
+			sendBadRequest = true
+		}
 		fmt.Printf("failed to parse request: %v\n", err)
 		return
 	}
@@ -116,7 +109,12 @@ func HandleAccept(conn net.Conn, r chi.Router) {
 	req.RemoteAddr = conn.RemoteAddr().String()
 
 	responseWriter := httpResponse.NewResponse(conn)
-	r.ServeHTTP(responseWriter, req)
+	if sendBadRequest {
+		responseWriter.WriteHeader(http.StatusBadRequest)
+		fmt.Printf("[BAD REQUEST] Request parser failed due to wrong placement of chunked encoding\n")
+	} else {
+		r.ServeHTTP(responseWriter, req)
+	}
 
 	fmt.Printf("handled connection from %v\n", conn.RemoteAddr())
 }
