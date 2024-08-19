@@ -1,13 +1,14 @@
-// https://github.com/go-chi/chi/blob/master/_examples/custom-handler/main.go
-
 package handler
 
 import (
 	"bufio"
+	"crypto/tls"
+	"errors"
 	"fmt"
 	"github.com/go-chi/chi/v5"
-	httpRequest "httpServer/internal/request"
-	httpResponse "httpServer/internal/response"
+	http11 "httpServer/internal/request/http1.1"
+	"httpServer/internal/request/http2"
+	http11Response "httpServer/internal/response/http1.1"
 	"io"
 	"net"
 	"net/http"
@@ -18,11 +19,12 @@ var notes = make(map[string]string)
 func PutNote(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
-	bodyReader := bufio.NewReader(r.Body)
+	bodyReader := r.Body
 
 	bodyBuffer, err := io.ReadAll(bodyReader)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
+		return
 	}
 
 	notes[id] = string(bodyBuffer)
@@ -95,25 +97,58 @@ func HandleAccept(conn net.Conn, r chi.Router) {
 		}
 	}(conn)
 
-	sendBadRequest := false
-	req, err := httpRequest.Parser(conn)
-	if err != nil {
-		if err.Error() == "chunked encoding was not at the end of the transfer encodings" {
-			sendBadRequest = true
-		}
-		fmt.Printf("failed to parse request: %v\n", err)
-		return
+	fmt.Printf("new connection from %v\n", conn.RemoteAddr())
+
+	tlsConn, ok := conn.(*tls.Conn)
+	if !ok {
+		panic(errors.New("cannot get TLS connection from non-TLS connection"))
 	}
 
-	fmt.Printf("new connection from %v\n", conn.RemoteAddr())
-	req.RemoteAddr = conn.RemoteAddr().String()
+	sendBadRequest := false
+	moreRequestsAvailable := false
+	var req *http.Request
+	var err error
+	var moreRequestsReader *bufio.Reader
 
-	responseWriter := httpResponse.NewResponse(conn)
-	if sendBadRequest {
-		responseWriter.WriteHeader(http.StatusBadRequest)
-		fmt.Printf("[BAD REQUEST] Request parser failed due to wrong placement of chunked encoding\n")
-	} else {
-		r.ServeHTTP(responseWriter, req)
+	if tlsConn.ConnectionState().NegotiatedProtocol == "http/1.1" {
+		for {
+			if moreRequestsAvailable {
+				req, err, moreRequestsAvailable, moreRequestsReader = http11.Parser(moreRequestsReader)
+			} else {
+				req, err, moreRequestsAvailable, moreRequestsReader = http11.Parser(conn)
+			}
+
+			if err != nil {
+				if errors.Is(err, http11.ChunkEncodingError) {
+					sendBadRequest = true
+				} else {
+					fmt.Printf("failed to parse request: %v\n", err)
+					return
+				}
+			}
+
+			req.RemoteAddr = conn.RemoteAddr().String()
+
+			responseWriter := http11Response.NewResponse(conn)
+			if sendBadRequest {
+				responseWriter.WriteHeader(http.StatusBadRequest)
+				fmt.Printf("[BAD REQUEST] Request parser failed due to wrong placement of chunked encoding\n")
+			} else {
+				r.ServeHTTP(responseWriter, req)
+			}
+
+			if !moreRequestsAvailable {
+				break
+			}
+		}
+	} else if tlsConn.ConnectionState().NegotiatedProtocol == "h2" {
+		// TODO: finish
+		req, err := http2.Parser(conn)
+		if err != nil {
+
+		}
+		println(req)
+		panic(errors.New("not implemented yet"))
 	}
 
 	fmt.Printf("handled connection from %v\n", conn.RemoteAddr())

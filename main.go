@@ -31,6 +31,7 @@ func main() {
 	}
 
 	tlsConfig := &tls.Config{
+		NextProtos:   []string{"h2", "http/1.1"},
 		Certificates: cert,
 	}
 	tlsListener := tls.NewListener(ln, tlsConfig)

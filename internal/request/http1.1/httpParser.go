@@ -1,9 +1,8 @@
-// TODO: fix openssl s_client -connect localhost:8080 -crlf <req.data
-
-package httpRequest
+package http1_1
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 )
+
+var ChunkEncodingError = errors.New("chunked encoding was not at the end of the transfer encodings")
 
 /****** HTTP1.1 ******/
 func parseStartLine(reader *bufio.Reader, req *http.Request) error {
@@ -96,7 +97,7 @@ func readHeader(reader *bufio.Reader) (http.Header, error) {
 }
 
 func parseHeader(reader *bufio.Reader, req *http.Request) error {
-	header, err := readHeader(bufio.NewReader(reader))
+	header, err := readHeader(reader)
 	if err != nil {
 		fmt.Println(req)
 		return err
@@ -106,7 +107,51 @@ func parseHeader(reader *bufio.Reader, req *http.Request) error {
 	return nil
 }
 
-func parseBody(reader *bufio.Reader, req *http.Request) error {
+func parseChunkedData(reader *bufio.Reader, req *http.Request) (string, error) {
+	var bodyContentBuffer string
+
+	// Respect \n
+	for {
+		chunkSizeStr, err := reader.ReadString('\n')
+		if err != nil {
+			return bodyContentBuffer, fmt.Errorf("can't read chunk size: %v", err)
+		}
+
+		chunkSizeStr = strings.Trim(chunkSizeStr, "\r\n")
+
+		// Disregard any chunk extensions
+		chunkSizeCut, _, found := strings.Cut(chunkSizeStr, ";")
+		if found {
+			chunkSizeStr = chunkSizeCut
+		}
+
+		chunkSize, err := strconv.ParseInt(chunkSizeStr, 16, 64)
+		if err != nil {
+			return bodyContentBuffer, fmt.Errorf("can't read chunk size: %v", err)
+		}
+
+		if chunkSize == 0 {
+			break
+		}
+
+		buffer, err := io.ReadAll(io.LimitReader(reader, chunkSize+2))
+		if err != nil {
+			return bodyContentBuffer, fmt.Errorf("can't read chunk content: %v", err)
+		}
+
+		bodyContentBuffer += string(buffer)
+	}
+
+	// checking if a trailer section is present
+	trailer, err := readHeader(reader)
+	if err != nil {
+		return bodyContentBuffer, err
+	}
+	req.Trailer = trailer
+	return bodyContentBuffer, nil
+}
+
+func parseBody(reader *bufio.Reader, req *http.Request) (error, bool) {
 	req.Host = req.Header.Get("Host")
 	req.Header.Del("Host")
 
@@ -117,16 +162,6 @@ func parseBody(reader *bufio.Reader, req *http.Request) error {
 
 	// Checking if chunked transfer-encoded
 	// Chunked transfer encoding overwrites the content-length header
-	// TODO: FIX
-	/* curl -X PUT -w '\n' -v -k https://127.0.0.1:8080/v1/notes/Hello-World \                                                                           ░▒▓ 52 х │ 15:20:40 ▓▒░
-	-H "Transfer-Encoding: chunked" \
-	--data @- << EOF
-	5
-	hello
-	5
-	world
-	0
-	EOF */
 	chunked := false
 	for _, encoding := range req.TransferEncoding {
 		if strings.ToLower(encoding) == "chunked" {
@@ -135,105 +170,67 @@ func parseBody(reader *bufio.Reader, req *http.Request) error {
 	}
 
 	if chunked && req.TransferEncoding[len(req.TransferEncoding)-1] != "chunked" {
-		return fmt.Errorf("chunked encoding was not at the end of the transfer encodings")
+		return ChunkEncodingError, false
 	}
 
 	if chunked {
-		if req.ContentLength != 0 {
+		if contentLength != 0 {
 			delete(req.Header, "Content-Length")
 			req.ContentLength = 0
 		}
 
-		bodyContentBuffer := ""
-
-		// Respect \n
-		for {
-			chunkSizeStr, err := reader.ReadString('\n')
-			if err != nil {
-				return fmt.Errorf("can't read chunk size: %v", err)
-			}
-
-			chunkSizeStr = strings.Trim(chunkSizeStr, "\r\n")
-
-			// Disregard any chunk extensions
-			chunkSizeCut, _, found := strings.Cut(chunkSizeStr, ";")
-			if found {
-				chunkSizeStr = chunkSizeCut
-			}
-
-			chunkSize, err := strconv.ParseInt(chunkSizeStr, 10, 64)
-			if err != nil {
-				return fmt.Errorf("can't read chunk size: %v", err)
-			}
-
-			if chunkSize == 0 {
-				break
-			}
-
-			buffer, err := io.ReadAll(io.LimitReader(reader, chunkSize))
-			if err != nil {
-				return fmt.Errorf("can't read chunk content: %v", err)
-			}
-
-			bodyContentBuffer += string(buffer)
-		}
-		readString, err := reader.ReadString('\n')
+		bodyContentBuffer, err := parseChunkedData(reader, req)
 		if err != nil {
-			return fmt.Errorf("can't read empty line after chunk content: %v", err)
+			return err, false
 		}
-
-		// Chunked encoding ends with an empty line
-		if strings.Trim(readString, "\r\n") == "" {
-			return nil
-		}
-
-		// If the line is not empty, a trailer section is present
-		trailer, err := readHeader(reader)
-		req.Trailer = trailer
+		req.Body = io.NopCloser(strings.NewReader(bodyContentBuffer))
 	}
 
 	// Checking if body got sent at once
 	if contentLengthString != "" {
 		if err != nil {
-			return fmt.Errorf("error parsing Content-Length: %v", err)
+			return fmt.Errorf("error parsing Content-Length: %v", err), false
 		}
 		req.ContentLength = contentLength
 
 		bodyContentBuffer, err := io.ReadAll(io.LimitReader(reader, contentLength))
 		if err != nil {
-			return fmt.Errorf("error reading body content: %v", err)
+			return fmt.Errorf("error reading chunked body content: %v", err), false
 		}
 
 		req.Body = io.NopCloser(io.LimitReader(strings.NewReader(string(bodyContentBuffer)), contentLength))
-
-		return nil
 	}
 
-	return nil
+	// Check if connection sent multiple requests
+	if reader.Buffered() != 0 {
+		return nil, true
+	}
+
+	return nil, false
 }
 
 /****** end of HTTP1.1 ******/
 
-func Parser(reader io.Reader) (*http.Request, error) {
+func Parser(reader io.Reader) (*http.Request, error, bool, *bufio.Reader) {
 	r := http.Request{}
 	iReader := bufio.NewReader(reader)
 
 	/****** HTTP1.1 ******/
 	err := parseStartLine(iReader, &r)
 	if err != nil {
-		return nil, err
+		return nil, err, false, iReader
 	}
 
 	err = parseHeader(iReader, &r)
 	if err != nil {
-		return nil, err
+		return nil, err, false, iReader
 	}
 
-	err = parseBody(iReader, &r)
+	err, multipleRequests := parseBody(iReader, &r)
 	if err != nil {
-		return nil, err
+		return nil, err, false, iReader
 	}
 	/****** end of HTTP1.1 ******/
 
-	return &r, nil
+	return &r, nil, multipleRequests, iReader
 }

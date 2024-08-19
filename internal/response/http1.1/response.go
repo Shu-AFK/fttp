@@ -1,4 +1,4 @@
-package httpResponse
+package http1_1
 
 import (
 	"fmt"
