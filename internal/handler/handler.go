@@ -100,23 +100,17 @@ func HandleAccept(conn net.Conn, r chi.Router) {
 	fmt.Printf("new connection from %v\n", conn.RemoteAddr())
 
 	tlsConn, ok := conn.(*tls.Conn)
-	if !ok {
-		panic(errors.New("cannot get TLS connection from non-TLS connection"))
-	}
 
 	sendBadRequest := false
-	moreRequestsAvailable := false
+	moreRequests := false
 	var req *http.Request
 	var err error
-	var moreRequestsReader *bufio.Reader
 
-	if tlsConn.ConnectionState().NegotiatedProtocol == "http/1.1" {
+	// TODO: Separate functions
+	if tlsConn.ConnectionState().NegotiatedProtocol == "http/1.1" || !ok {
+		requestReader := bufio.NewReader(conn)
 		for {
-			if moreRequestsAvailable {
-				req, err, moreRequestsAvailable, moreRequestsReader = http11.Parser(moreRequestsReader)
-			} else {
-				req, err, moreRequestsAvailable, moreRequestsReader = http11.Parser(conn)
-			}
+			req, err, moreRequests = http11.Parser(requestReader)
 
 			if err != nil {
 				if errors.Is(err, http11.ChunkEncodingError) {
@@ -137,13 +131,15 @@ func HandleAccept(conn net.Conn, r chi.Router) {
 				r.ServeHTTP(responseWriter, req)
 			}
 
-			if !moreRequestsAvailable {
+			if !moreRequests {
 				break
 			}
 		}
 	} else if tlsConn.ConnectionState().NegotiatedProtocol == "h2" {
+		requestReader := bufio.NewReader(tlsConn)
+
 		// TODO: finish
-		req, err := http2.Parser(conn)
+		req, err := http2.Parser(requestReader)
 		if err != nil {
 
 		}

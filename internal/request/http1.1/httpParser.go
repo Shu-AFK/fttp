@@ -2,6 +2,7 @@ package http1_1
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -138,6 +139,7 @@ func parseChunkedData(reader *bufio.Reader, req *http.Request) (string, error) {
 		if err != nil {
 			return bodyContentBuffer, fmt.Errorf("can't read chunk content: %v", err)
 		}
+		buffer = bytes.Trim(buffer, "\r\n")
 
 		bodyContentBuffer += string(buffer)
 	}
@@ -151,7 +153,7 @@ func parseChunkedData(reader *bufio.Reader, req *http.Request) (string, error) {
 	return bodyContentBuffer, nil
 }
 
-func parseBody(reader *bufio.Reader, req *http.Request) (error, bool) {
+func parseBody(reader *bufio.Reader, req *http.Request) error {
 	req.Host = req.Header.Get("Host")
 	req.Header.Del("Host")
 
@@ -170,7 +172,7 @@ func parseBody(reader *bufio.Reader, req *http.Request) (error, bool) {
 	}
 
 	if chunked && req.TransferEncoding[len(req.TransferEncoding)-1] != "chunked" {
-		return ChunkEncodingError, false
+		return ChunkEncodingError
 	}
 
 	if chunked {
@@ -181,56 +183,50 @@ func parseBody(reader *bufio.Reader, req *http.Request) (error, bool) {
 
 		bodyContentBuffer, err := parseChunkedData(reader, req)
 		if err != nil {
-			return err, false
+			return err
 		}
 		req.Body = io.NopCloser(strings.NewReader(bodyContentBuffer))
-	}
-
-	// Checking if body got sent at once
-	if contentLengthString != "" {
+	} else if contentLengthString != "" {
 		if err != nil {
-			return fmt.Errorf("error parsing Content-Length: %v", err), false
+			return fmt.Errorf("error parsing Content-Length: %v", err)
 		}
 		req.ContentLength = contentLength
 
 		bodyContentBuffer, err := io.ReadAll(io.LimitReader(reader, contentLength))
 		if err != nil {
-			return fmt.Errorf("error reading chunked body content: %v", err), false
+			return fmt.Errorf("error reading chunked body content: %v", err)
 		}
 
 		req.Body = io.NopCloser(io.LimitReader(strings.NewReader(string(bodyContentBuffer)), contentLength))
 	}
 
-	// Check if connection sent multiple requests
-	if reader.Buffered() != 0 {
-		return nil, true
-	}
-
-	return nil, false
+	return nil
 }
 
 /****** end of HTTP1.1 ******/
 
-func Parser(reader io.Reader) (*http.Request, error, bool, *bufio.Reader) {
+func Parser(reader *bufio.Reader) (*http.Request, error, bool) {
 	r := http.Request{}
-	iReader := bufio.NewReader(reader)
 
 	/****** HTTP1.1 ******/
-	err := parseStartLine(iReader, &r)
+	err := parseStartLine(reader, &r)
 	if err != nil {
-		return nil, err, false, iReader
+		return nil, err, false
 	}
 
-	err = parseHeader(iReader, &r)
+	err = parseHeader(reader, &r)
 	if err != nil {
-		return nil, err, false, iReader
+		return nil, err, false
 	}
 
-	err, multipleRequests := parseBody(iReader, &r)
+	err = parseBody(reader, &r)
 	if err != nil {
-		return nil, err, false, iReader
+		return nil, err, false
 	}
 	/****** end of HTTP1.1 ******/
 
-	return &r, nil, multipleRequests, iReader
+	if r.Header.Get("Connection") == "keep-alive" || r.Header.Get("Connection") == "" {
+		return &r, nil, true
+	}
+	return &r, nil, false
 }
