@@ -80,6 +80,7 @@ func (r *Response) WriteHeader(statusCode int) {
 
 	_, err = r.connection.Write([]byte("\r\n"))
 	if err != nil {
+		fmt.Printf("Error writing response: %v\n", err)
 		return
 	}
 

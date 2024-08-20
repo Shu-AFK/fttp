@@ -33,35 +33,19 @@ const (
 	CONTINUATION_FRAME_TYPE
 )
 
-var ConnectionPreface = "PRI * HTTP/2.0\\r\\n\\r\\nSM\\r\\n\\r\\n"
+const (
+	PADDED           = 0x08
+	END_STREAM       = 0x01
+	END_HEADERS      = 0x04
+	HEADERS_PRIORITY = 0x20
+	ACK              = 0x01
+)
 
-func verifyConnectionPreface(reader *bufio.Reader) error {
-	preface, err := reader.ReadBytes(24)
-	if err != nil {
-		return err
-	}
-	if string(preface) != ConnectionPreface {
-		return fmt.Errorf("invalid connection preface")
-	}
-
-	frame, err := parseFrame(reader)
-	if err != nil {
-		return fmt.Errorf("cannot parse frames: %v", err)
-	}
-
-	err = validateSettingsFrame(frame)
-	if err != nil {
-		return fmt.Errorf("cannot validate settings frame: %v", err)
-	}
-
-	return nil
-}
-
-func parseFrame(reader *bufio.Reader) (*Frame, error) {
+func ParseFrame(reader *bufio.Reader) (*Frame, error) {
 	newFrame := new(Frame)
 
 	var buffer bytes.Buffer
-	_, err := io.CopyN(&buffer, reader, 10)
+	_, err := io.CopyN(&buffer, reader, 9)
 	if err != nil {
 		return nil, fmt.Errorf("cannot read frame data: %v", err)
 	}
@@ -87,20 +71,6 @@ func parseFrame(reader *bufio.Reader) (*Frame, error) {
 	return newFrame, nil
 }
 
-func validateSettingsFrame(frame *Frame) error {
-	if frame.Type != SETTINGS_FRAME_TYPE {
-		return fmt.Errorf("invalid first frame type, needs to be a settings frame: %v", frame.Type)
-	}
-	if frame.StreamID != 0x0 {
-		return fmt.Errorf("invalid first frame stream id: %v", frame.StreamID)
-	}
-	if len(frame.Payload)%6 != 0 {
-		return fmt.Errorf("invalid frame payload length: %v", len(frame.Payload))
-	}
-
-	return nil
-}
-
 func parseHeader(key string, value string, r *http.Request) error {
 	if key == ":method" {
 		r.Method = value
@@ -111,8 +81,13 @@ func parseHeader(key string, value string, r *http.Request) error {
 			return fmt.Errorf("invalid request URI: %v", r.RequestURI)
 		}
 		r.URL = u
+	} else if key == ":authority" {
+		r.Host = value
 	}
 
+	if key[0] == ':' {
+		return nil
+	}
 	values := strings.Split(value, ",")
 
 	for _, v := range values {
@@ -122,16 +97,18 @@ func parseHeader(key string, value string, r *http.Request) error {
 	return nil
 }
 
-func parseHeaders(frame *Frame, r *http.Request) error {
+func parseHeaders(frame *Frame, r *http.Request, dec *hpack.Decoder) error {
 	var buffer bytes.Buffer
 	var paddingLength uint8
 	var bytesReadAlready uint8
-	dec := hpack.NewDecoder()
 
+	r.Header = make(http.Header)
+
+	// bytes.NewBuffer mit frame.Payload
 	bodyReader := bufio.NewReader(bytes.NewReader(frame.Payload))
 
 	// Padding flag set
-	if frame.Flags&0x08 != 0 {
+	if frame.Flags&PADDED != 0 {
 		_, err := io.CopyN(&buffer, bodyReader, 1)
 		if err != nil {
 			return fmt.Errorf("cannot read header padding length: %v", err)
@@ -145,12 +122,11 @@ func parseHeaders(frame *Frame, r *http.Request) error {
 	}
 
 	// Priority flag set
-	if frame.Flags&0x20 != 0 {
-		_, err := io.CopyN(&buffer, bodyReader, 5)
+	if frame.Flags&HEADERS_PRIORITY != 0 {
+		_, err := bodyReader.Discard(5)
 		if err != nil {
-			return fmt.Errorf("cannot read header priority information: %v", err)
+			return fmt.Errorf("cannot read header priority: %v", err)
 		}
-		buffer.Next(5)
 		bytesReadAlready += 5
 	}
 
@@ -161,11 +137,11 @@ func parseHeaders(frame *Frame, r *http.Request) error {
 
 	pos := 0
 	bufferBytes := buffer.Bytes()
-	// correct?
 	bufferBytes = bufferBytes[:len(bufferBytes)-int(paddingLength)]
 
+	// TODO: decode all header payloads as one
 	for {
-		headerContent, nPos, err := dec.Decode(bufferBytes[:pos], true)
+		headerContent, nPos, err := dec.Decode(bufferBytes[pos:], true)
 		if err != nil {
 			fmt.Println(fmt.Sprintf("cannot read header content: %v", err))
 			break
@@ -190,18 +166,23 @@ func parseHeaders(frame *Frame, r *http.Request) error {
 	return nil
 }
 
-func validateHeaderFrames(reader *bufio.Reader, r *http.Request) (bool, error) {
+func validateHeaderFrames(reader *bufio.Reader, r *http.Request, dec *hpack.Decoder) (bool, error) {
 	firstIteration := true
+	endStream := false
 
 	for {
-		frame, err := parseFrame(reader)
+		frame, err := ParseFrame(reader)
 		if err != nil {
 			return false, err
 		}
 
+		if frame.Type == DATA_FRAME_TYPE {
+			return false, fmt.Errorf("invalid frame type: %v", frame.Type)
+		}
+
 		if firstIteration && frame.Type != HEADER_FRAME_TYPE {
-			return false, fmt.Errorf("invalid first header frame type, needs to be a header frame: %v", frame.Type)
-		} else if !firstIteration && frame.Type != HEADER_FRAME_TYPE && frame.Type != CONTINUATION_FRAME_TYPE {
+			continue
+		} else if !firstIteration && frame.Type != CONTINUATION_FRAME_TYPE {
 			return false, nil
 		}
 
@@ -212,16 +193,24 @@ func validateHeaderFrames(reader *bufio.Reader, r *http.Request) (bool, error) {
 		firstIteration = false
 
 		// End stream
-		if frame.Flags&0x01 != 0 && frame.Type == HEADER_FRAME_TYPE {
-			err := parseHeaders(frame, r)
+		if frame.Flags&END_STREAM != 0 && frame.Type == HEADER_FRAME_TYPE {
+			err := parseHeaders(frame, r, dec)
+			if err != nil {
+				return false, err
+			}
+			endStream = true
+			continue
+		}
+
+		// End headers
+		if frame.Flags&END_HEADERS != 0 && endStream {
+			err := parseHeaders(frame, r, dec)
 			if err != nil {
 				return false, err
 			}
 			return false, nil
-		}
-		// End headers
-		if frame.Flags&0x04 != 0 {
-			err := parseHeaders(frame, r)
+		} else if frame.Flags&END_HEADERS != 0 && !endStream {
+			err := parseHeaders(frame, r, dec)
 			if err != nil {
 				return false, err
 			}
@@ -237,7 +226,7 @@ func getDataFrameContent(frame *Frame) ([]byte, error) {
 
 	bodyReader := bufio.NewReader(bytes.NewReader(frame.Payload))
 
-	if frame.Flags&0x08 != 0 {
+	if frame.Flags&PADDED != 0 {
 		_, err := io.CopyN(&bodyContentBuffer, bodyReader, 1)
 		if err != nil {
 			return nil, fmt.Errorf("cannot read header padding length: %v", err)
@@ -256,17 +245,18 @@ func getDataFrameContent(frame *Frame) ([]byte, error) {
 	return bodyContent, nil
 }
 
+// TODO: Check if header but stream not over yet (need to parse footer)
 func parseDataFrames(reader *bufio.Reader, r *http.Request) error {
 	var dataContentBuffer bytes.Buffer
 
 	for {
-		frame, err := parseFrame(reader)
+		frame, err := ParseFrame(reader)
 		if err != nil {
 			return fmt.Errorf("cannot read frame data: %v", err)
 		}
 
 		if frame.Type != DATA_FRAME_TYPE {
-			return fmt.Errorf("invalid frame type, needs to be a data frame: %v", frame.Type)
+			continue
 		}
 
 		if frame.StreamID == 0x0 {
@@ -280,19 +270,19 @@ func parseDataFrames(reader *bufio.Reader, r *http.Request) error {
 		dataContentBuffer.Write(content)
 
 		// End stream
-		if frame.Flags&0x01 != 0 {
+		if frame.Flags&END_STREAM != 0 {
 			break
 		}
 	}
 
 	dataContent := dataContentBuffer.String()
-	r.Body = io.NopCloser(io.LimitReader(strings.NewReader(dataContent), int64(len(dataContent))))
+	r.Body = io.NopCloser(strings.NewReader(dataContent))
 
 	return nil
 }
 
-func parseFrames(reader *bufio.Reader, r *http.Request) error {
-	dataToRead, err := validateHeaderFrames(reader, r)
+func ParseFrames(reader *bufio.Reader, r *http.Request, dec *hpack.Decoder) error {
+	dataToRead, err := validateHeaderFrames(reader, r, dec)
 	if err != nil {
 		return fmt.Errorf("cannot validate headers frame: %v", err)
 	}
@@ -307,17 +297,18 @@ func parseFrames(reader *bufio.Reader, r *http.Request) error {
 	return nil
 }
 
-func Parser(reader io.Reader) (*http.Request, error) {
+func ParseSettingsFrameContent(frame *Frame) ([]int, error) {
+	return nil, nil
+}
+
+func Parser(reader io.Reader, dec *hpack.Decoder) (*http.Request, error) {
 	r := http.Request{}
+	// To avoid nil dereference
+	r.Body = io.NopCloser(strings.NewReader(""))
 	iReader := bufio.NewReader(reader)
 
-	err := verifyConnectionPreface(iReader)
-	if err != nil {
-		return nil, err
-	}
-
 	// Settings frame
-	err = parseFrames(iReader, &r)
+	err := ParseFrames(iReader, &r, dec)
 	if err != nil {
 		return nil, err
 	}

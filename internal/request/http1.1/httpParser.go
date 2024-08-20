@@ -197,7 +197,7 @@ func parseBody(reader *bufio.Reader, req *http.Request) error {
 			return fmt.Errorf("error reading chunked body content: %v", err)
 		}
 
-		req.Body = io.NopCloser(io.LimitReader(strings.NewReader(string(bodyContentBuffer)), contentLength))
+		req.Body = io.NopCloser(strings.NewReader(string(bodyContentBuffer)))
 	}
 
 	return nil
@@ -225,7 +225,8 @@ func Parser(reader *bufio.Reader) (*http.Request, error, bool) {
 	}
 	/****** end of HTTP1.1 ******/
 
-	if r.Header.Get("Connection") == "keep-alive" || r.Header.Get("Connection") == "" {
+	//  || r.Header.Get("Connection") == "" ???
+	if r.Header.Get("Connection") == "keep-alive" {
 		return &r, nil, true
 	}
 	return &r, nil, false

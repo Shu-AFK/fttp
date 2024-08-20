@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"github.com/go-chi/chi/v5"
+	hpack "github.com/tatsuhiro-t/go-http2-hpack"
 	http11 "httpServer/internal/request/http1.1"
-	"httpServer/internal/request/http2"
+	http2 "httpServer/internal/request/http2"
 	http11Response "httpServer/internal/response/http1.1"
+	http2Response "httpServer/internal/response/http2"
 	"io"
 	"net"
 	"net/http"
@@ -48,7 +50,15 @@ func GetNotes(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, err := w.Write([]byte(notesContent))
 		if err != nil {
-			fmt.Printf("[GET] Response writer failed with: %s", err)
+			fmt.Printf("[GET] Response writer failed with: %s\n", err)
+		}
+
+		// Terminate the stream
+		if r.ProtoMajor == '2' {
+			_, err := w.Write(nil)
+			if err != nil {
+				fmt.Printf("[GET] Response writer failed with: %s\n", err)
+			}
 		}
 
 	} else {
@@ -68,8 +78,15 @@ func GetNoteById(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, err := w.Write([]byte(note))
 	if err != nil {
-		fmt.Printf("[GET BY ID] Response writer failed with: %s", err)
+		fmt.Printf("[GET BY ID] Response writer failed with: %s\n", err)
 		return
+	}
+
+	if r.ProtoMajor == '2' {
+		_, err := w.Write(nil)
+		if err != nil {
+			fmt.Printf("[GET BY ID] Response writer failed with: %s\n", err)
+		}
 	}
 }
 
@@ -79,6 +96,13 @@ func NotFoundHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		fmt.Printf("[NOT FOUND HANDLER] Response writer failed with: %s\n", err)
 	}
+
+	if r.ProtoMajor == '2' {
+		_, err := w.Write(nil)
+		if err != nil {
+			fmt.Printf("[NOT FOUND HANDLER] Response writer failed with: %s\n", err)
+		}
+	}
 }
 
 func MethodNotAllowedHandler(w http.ResponseWriter, r *http.Request) {
@@ -86,6 +110,13 @@ func MethodNotAllowedHandler(w http.ResponseWriter, r *http.Request) {
 	_, err := w.Write([]byte("Method Not Allowed"))
 	if err != nil {
 		fmt.Printf("[METHOD NOT ALLOWED HANDLER] Response writer failed with: %s\n", err)
+	}
+
+	if r.ProtoMajor == '2' {
+		_, err := w.Write(nil)
+		if err != nil {
+			fmt.Printf("[METHOD NOT ALLOWED HANDLER] Response writer failed with: %s\n", err)
+		}
 	}
 }
 
@@ -100,6 +131,13 @@ func HandleAccept(conn net.Conn, r chi.Router) {
 	fmt.Printf("new connection from %v\n", conn.RemoteAddr())
 
 	tlsConn, ok := conn.(*tls.Conn)
+	if ok {
+		err := tlsConn.Handshake()
+		if err != nil {
+			fmt.Printf("[HANDLER] Handshake failed with: %s\n", err)
+			return
+		}
+	}
 
 	sendBadRequest := false
 	moreRequests := false
@@ -107,7 +145,7 @@ func HandleAccept(conn net.Conn, r chi.Router) {
 	var err error
 
 	// TODO: Separate functions
-	if tlsConn.ConnectionState().NegotiatedProtocol == "http/1.1" || !ok {
+	if !ok || tlsConn.ConnectionState().NegotiatedProtocol == "http/1.1" {
 		requestReader := bufio.NewReader(conn)
 		for {
 			req, err, moreRequests = http11.Parser(requestReader)
@@ -137,14 +175,40 @@ func HandleAccept(conn net.Conn, r chi.Router) {
 		}
 	} else if tlsConn.ConnectionState().NegotiatedProtocol == "h2" {
 		requestReader := bufio.NewReader(tlsConn)
+		dec := hpack.NewDecoder()
 
-		// TODO: finish
-		req, err := http2.Parser(requestReader)
+		// Validate settings frame
+		err := http2Response.VerifyConnectionPreface(requestReader)
 		if err != nil {
-
+			fmt.Printf("failed to verify connection preface: %v\n", err)
+			return
 		}
-		println(req)
-		panic(errors.New("not implemented yet"))
+
+		err = http2Response.SendSettingsFrame(tlsConn, requestReader)
+		if err != nil {
+			fmt.Printf("failed to send settings frame: %v\n", err)
+			return
+		}
+
+		req, err := http2.Parser(requestReader, dec)
+		if err != nil {
+			fmt.Printf("failed to parse request: %v\n", err)
+			return
+		}
+
+		req.RemoteAddr = conn.RemoteAddr().String()
+
+		responseWriter := http2Response.NewResponse(conn)
+		r.ServeHTTP(responseWriter, req)
+
+		// Debug
+		fmt.Println(req)
+		buffer, err := io.ReadAll(req.Body)
+		if err != nil {
+			fmt.Printf("failed to read body: %v\n", err)
+			return
+		}
+		fmt.Println(string(buffer))
 	}
 
 	fmt.Printf("handled connection from %v\n", conn.RemoteAddr())
