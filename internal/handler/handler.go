@@ -168,17 +168,25 @@ func HandleAccept(conn net.Conn, r chi.Router) {
 			return
 		}
 
-		req, lastStreamID, err := http2.Parser(requestReader, dec)
+		req, err := http2.Parser(requestReader, dec)
 		if err != nil {
-			fmt.Printf("failed to parse request: %v\n", err)
+			fmt.Printf("failed to parse requests: %v\n", err)
 			return
 		}
 
-		req.RemoteAddr = conn.RemoteAddr().String()
+		counter := 0
+		for streamId, _ := range http2.Channels {
+			req[counter].RemoteAddr = conn.RemoteAddr().String()
 
-		responseWriter := http2Response.NewResponse(conn, lastStreamID)
-		r.ServeHTTP(responseWriter, req)
+			responseWriter := http2Response.NewResponse(conn, streamId)
+			r.ServeHTTP(responseWriter, req[counter])
+			err := http2Response.SendFrame(conn, http2.DATA_FRAME_TYPE, http2.END_STREAM, streamId, nil)
+			if err != nil {
+				fmt.Printf("failed to send frame: %v\n", err)
+			}
 
+			counter++
+		}
 	}
 
 	fmt.Printf("handled connection from %v\n", conn.RemoteAddr())

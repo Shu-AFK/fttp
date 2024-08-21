@@ -10,7 +10,18 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 )
+
+type Communication struct {
+	Frames chan Frame
+	Req    chan *http.Request
+	Err    chan error
+	Done   chan bool
+
+	Mutex *sync.Mutex
+	Dec   *hpack.Decoder
+}
 
 type Frame struct {
 	Length   uint32
@@ -40,6 +51,8 @@ const (
 	HEADERS_PRIORITY = 0x20
 	ACK              = 0x01
 )
+
+var Channels = make(map[uint32]*Communication)
 
 func ParseFrame(reader *bufio.Reader) (*Frame, error) {
 	newFrame := new(Frame)
@@ -97,7 +110,7 @@ func parseHeader(key string, value string, r *http.Request) error {
 	return nil
 }
 
-func parseHeaders(frame *Frame, r *http.Request, dec *hpack.Decoder) error {
+func parseHeaders(frame *Frame, r *http.Request, dec *hpack.Decoder, mutex *sync.Mutex) error {
 	var buffer bytes.Buffer
 	var paddingLength uint8
 	var bytesReadAlready uint8
@@ -141,7 +154,9 @@ func parseHeaders(frame *Frame, r *http.Request, dec *hpack.Decoder) error {
 
 	// TODO: decode all header payloads as one
 	for {
+		mutex.Lock()
 		headerContent, nPos, err := dec.Decode(bufferBytes[pos:], true)
+		mutex.Unlock()
 		if err != nil {
 			fmt.Println(fmt.Sprintf("cannot read header content: %v", err))
 			break
@@ -164,62 +179,6 @@ func parseHeaders(frame *Frame, r *http.Request, dec *hpack.Decoder) error {
 	r.ProtoMinor = 0
 
 	return nil
-}
-
-func validateHeaderFrames(reader *bufio.Reader, r *http.Request, dec *hpack.Decoder) (bool, uint32, error) {
-	var lastStreamID uint32
-
-	firstIteration := true
-	endStream := false
-
-	for {
-		frame, err := ParseFrame(reader)
-		if err != nil {
-			return false, 0, err
-		}
-
-		if frame.Type == DATA_FRAME_TYPE {
-			return false, 0, fmt.Errorf("invalid frame type: %v", frame.Type)
-		}
-
-		if firstIteration && frame.Type != HEADER_FRAME_TYPE {
-			continue
-		} else if !firstIteration && frame.Type != CONTINUATION_FRAME_TYPE {
-			return !endStream, lastStreamID, nil
-		}
-
-		if frame.StreamID == 0x0 {
-			return false, 0, fmt.Errorf("invalid frame stream id: %v", frame.StreamID)
-		}
-
-		firstIteration = false
-		lastStreamID = frame.StreamID
-
-		// End stream
-		if frame.Flags&END_STREAM != 0 && frame.Type == HEADER_FRAME_TYPE {
-			err := parseHeaders(frame, r, dec)
-			if err != nil {
-				return false, 0, err
-			}
-			endStream = true
-			continue
-		}
-
-		// End headers
-		if frame.Flags&END_HEADERS != 0 && endStream {
-			err := parseHeaders(frame, r, dec)
-			if err != nil {
-				return false, lastStreamID, err
-			}
-			return false, 0, nil
-		} else if frame.Flags&END_HEADERS != 0 && !endStream {
-			err := parseHeaders(frame, r, dec)
-			if err != nil {
-				return false, 0, err
-			}
-			return true, lastStreamID, nil
-		}
-	}
 }
 
 func getDataFrameContent(frame *Frame) ([]byte, error) {
@@ -248,79 +207,168 @@ func getDataFrameContent(frame *Frame) ([]byte, error) {
 	return bodyContent, nil
 }
 
-// TODO: Check if header but stream not over yet (need to parse footer)
-func parseDataFrames(reader *bufio.Reader, r *http.Request) (uint32, error) {
-	var dataContentBuffer bytes.Buffer
-	var lastStreamID uint32
+func parseHeaderFrame(frame Frame, r *http.Request, dec hpack.Decoder, mutex *sync.Mutex) (bool, error) {
+	var endStreamSet bool
 
-	for {
-		frame, err := ParseFrame(reader)
-		if err != nil {
-			return 0, fmt.Errorf("cannot read frame data: %v", err)
-		}
+	if frame.Flags&END_STREAM != 0 && frame.Type == HEADER_FRAME_TYPE {
+		endStreamSet = true
+	} else if frame.Flags&END_HEADERS != 0 && frame.Type == CONTINUATION_FRAME_TYPE {
+		return false, fmt.Errorf("invalid frame, continuation frame with end headers flag")
+	}
 
-		if frame.Type != DATA_FRAME_TYPE {
+	err := parseHeaders(&frame, r, &dec, mutex)
+	if err != nil {
+		return false, fmt.Errorf("cannot parse headers: %v", err)
+	}
+
+	if endStreamSet {
+		return false, nil
+	}
+	return true, nil
+}
+
+func parseDataFrame(frame Frame, bodyContent *string) (bool, error) {
+	content, err := getDataFrameContent(&frame)
+	if err != nil {
+		return false, fmt.Errorf("cannot read frame content: %v", err)
+	}
+
+	*bodyContent += string(content)
+
+	if frame.Flags&END_STREAM != 0 {
+		return false, nil
+	}
+
+	return true, nil
+}
+
+func checkIfDone() bool {
+	done := 0
+
+	for _, value := range Channels {
+		select {
+		case <-value.Done:
+			done = 1
 			continue
-		}
-
-		if frame.StreamID == 0x0 {
-			return 0, fmt.Errorf("invalid frame stream id: %v", frame.StreamID)
-		}
-
-		content, err := getDataFrameContent(frame)
-		if err != nil {
-			return 0, fmt.Errorf("cannot read frame content: %v", err)
-		}
-		dataContentBuffer.Write(content)
-		lastStreamID = frame.StreamID
-
-		// End stream
-		if frame.Flags&END_STREAM != 0 {
+		default:
+			done = 0
 			break
 		}
 	}
 
-	dataContent := dataContentBuffer.String()
-	r.Body = io.NopCloser(strings.NewReader(dataContent))
-
-	return lastStreamID, nil
+	if done == 0 {
+		return false
+	} else {
+		return true
+	}
 }
 
-func ParseFrames(reader *bufio.Reader, r *http.Request, dec *hpack.Decoder) (uint32, error) {
-	var lastStreamID uint32
-	var err error
+func handleMultiplexedFrameParsing(comm *Communication) {
+	r := new(http.Request)
+	var bodyContent string
 
-	dataToRead, lastStreamID, err := validateHeaderFrames(reader, r, dec)
-	if err != nil {
-		return 0, fmt.Errorf("cannot validate headers frame: %v", err)
-	}
+	dec := comm.Dec
 
-	if dataToRead {
-		lastStreamID, err = parseDataFrames(reader, r)
-		if err != nil {
-			return 0, fmt.Errorf("cannot parse data frames: %v", err)
+Loop:
+	for frame := range comm.Frames {
+		switch frame.Type {
+		case CONTINUATION_FRAME_TYPE:
+			fallthrough
+		case HEADER_FRAME_TYPE:
+			moreFrames, err := parseHeaderFrame(frame, r, *dec, comm.Mutex)
+			if err != nil {
+				comm.Err <- fmt.Errorf("cannot parse header frame: %v", err)
+				return
+			}
+			if !moreFrames {
+				break Loop
+			}
+			break
+
+		case DATA_FRAME_TYPE:
+			moreFrames, err := parseDataFrame(frame, &bodyContent)
+			if err != nil {
+				comm.Err <- fmt.Errorf("cannot parse data frame: %v", err)
+				return
+			}
+			if !moreFrames {
+				break Loop
+			}
+			break
+		default:
+			continue
 		}
 	}
 
-	return lastStreamID, nil
+	r.Body = io.NopCloser(strings.NewReader(bodyContent))
+	comm.Req <- r
+	close(comm.Done)
 }
 
-// TODO: Implement??
-func ParseSettingsFrameContent(frame *Frame) ([]int, error) {
-	return nil, nil
+func handleStreamMultiplexing(reader *bufio.Reader, dec *hpack.Decoder) ([]*http.Request, error) {
+	mutex := new(sync.Mutex)
+
+	for {
+		done := checkIfDone()
+		if done {
+			break
+		}
+
+		frame, err := ParseFrame(reader)
+		if err != nil {
+			return nil, fmt.Errorf("cannot parse frame data: %v", err)
+		}
+
+		if frame.StreamID == 0 {
+			continue
+		}
+
+		newChannel := false
+
+		if _, exists := Channels[frame.StreamID]; !exists {
+			comm := new(Communication)
+			comm.Frames = make(chan Frame)
+			comm.Req = make(chan *http.Request)
+			comm.Err = make(chan error)
+			comm.Done = make(chan bool)
+
+			comm.Dec = dec
+			comm.Mutex = mutex
+
+			Channels[frame.StreamID] = comm
+			newChannel = true
+		}
+
+		go func() {
+			Channels[frame.StreamID].Frames <- *frame
+		}()
+		if newChannel {
+			go handleMultiplexedFrameParsing(Channels[frame.StreamID])
+		}
+	}
+	requests := *new([]*http.Request)
+
+	for _, value := range Channels {
+		err := <-value.Err
+		if err != nil {
+			return nil, err
+		}
+
+		req := <-value.Req
+		requests = append(requests, req)
+	}
+
+	return requests, nil
 }
 
-func Parser(reader io.Reader, dec *hpack.Decoder) (*http.Request, uint32, error) {
-	r := http.Request{}
-	// To avoid nil dereference
-	r.Body = io.NopCloser(strings.NewReader(""))
+func Parser(reader io.Reader, dec *hpack.Decoder) ([]*http.Request, error) {
 	iReader := bufio.NewReader(reader)
 
 	// Settings frame
-	lastStreamID, err := ParseFrames(iReader, &r, dec)
+	r, err := handleStreamMultiplexing(iReader, dec)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 
-	return &r, lastStreamID, nil
+	return r, nil
 }
