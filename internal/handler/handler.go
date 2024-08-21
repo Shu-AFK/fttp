@@ -53,14 +53,6 @@ func GetNotes(w http.ResponseWriter, r *http.Request) {
 			fmt.Printf("[GET] Response writer failed with: %s\n", err)
 		}
 
-		// Terminate the stream
-		if r.ProtoMajor == '2' {
-			_, err := w.Write(nil)
-			if err != nil {
-				fmt.Printf("[GET] Response writer failed with: %s\n", err)
-			}
-		}
-
 	} else {
 		w.WriteHeader(http.StatusNoContent)
 	}
@@ -81,13 +73,6 @@ func GetNoteById(w http.ResponseWriter, r *http.Request) {
 		fmt.Printf("[GET BY ID] Response writer failed with: %s\n", err)
 		return
 	}
-
-	if r.ProtoMajor == '2' {
-		_, err := w.Write(nil)
-		if err != nil {
-			fmt.Printf("[GET BY ID] Response writer failed with: %s\n", err)
-		}
-	}
 }
 
 func NotFoundHandler(w http.ResponseWriter, r *http.Request) {
@@ -95,13 +80,6 @@ func NotFoundHandler(w http.ResponseWriter, r *http.Request) {
 	_, err := w.Write([]byte("Not Found"))
 	if err != nil {
 		fmt.Printf("[NOT FOUND HANDLER] Response writer failed with: %s\n", err)
-	}
-
-	if r.ProtoMajor == '2' {
-		_, err := w.Write(nil)
-		if err != nil {
-			fmt.Printf("[NOT FOUND HANDLER] Response writer failed with: %s\n", err)
-		}
 	}
 }
 
@@ -112,7 +90,7 @@ func MethodNotAllowedHandler(w http.ResponseWriter, r *http.Request) {
 		fmt.Printf("[METHOD NOT ALLOWED HANDLER] Response writer failed with: %s\n", err)
 	}
 
-	if r.ProtoMajor == '2' {
+	if r.ProtoMajor == 2 {
 		_, err := w.Write(nil)
 		if err != nil {
 			fmt.Printf("[METHOD NOT ALLOWED HANDLER] Response writer failed with: %s\n", err)
@@ -190,7 +168,7 @@ func HandleAccept(conn net.Conn, r chi.Router) {
 			return
 		}
 
-		req, err := http2.Parser(requestReader, dec)
+		req, lastStreamID, err := http2.Parser(requestReader, dec)
 		if err != nil {
 			fmt.Printf("failed to parse request: %v\n", err)
 			return
@@ -198,17 +176,9 @@ func HandleAccept(conn net.Conn, r chi.Router) {
 
 		req.RemoteAddr = conn.RemoteAddr().String()
 
-		responseWriter := http2Response.NewResponse(conn)
+		responseWriter := http2Response.NewResponse(conn, lastStreamID)
 		r.ServeHTTP(responseWriter, req)
 
-		// Debug
-		fmt.Println(req)
-		buffer, err := io.ReadAll(req.Body)
-		if err != nil {
-			fmt.Printf("failed to read body: %v\n", err)
-			return
-		}
-		fmt.Println(string(buffer))
 	}
 
 	fmt.Printf("handled connection from %v\n", conn.RemoteAddr())
