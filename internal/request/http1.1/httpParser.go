@@ -225,8 +225,7 @@ func Parser(reader *bufio.Reader) (*http.Request, error, bool) {
 	}
 	/****** end of HTTP1.1 ******/
 
-	//  || r.Header.Get("Connection") == "" ???
-	if r.Header.Get("Connection") == "keep-alive" {
+	if r.Header.Get("Connection") == "keep-alive" || (r.Header.Get("Connection") == "" && r.ProtoMinor == 1) {
 		return &r, nil, true
 	}
 	return &r, nil, false

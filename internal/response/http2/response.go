@@ -5,7 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	hpack "github.com/tatsuhiro-t/go-http2-hpack"
-	"httpServer/internal/request/http2"
+	"httpServer/internal/http2/structs"
 	"net"
 	"net/http"
 	"strconv"
@@ -16,6 +16,7 @@ type Response struct {
 	header             http.Header
 	body               []byte
 	connection         net.Conn
+	enc                *hpack.Encoder
 	lastStreamID       uint32
 	headerWritten      bool
 	preventFutureReads bool
@@ -24,6 +25,8 @@ type Response struct {
 
 const CONTENTSIZEMIN = 1_024 * 5
 const MAX_DATA_BODY_LENGTH = 16_000_000
+
+//goland:noinspection ALL
 const MAX_HEADER_BODY_LENGTH = 8_000
 
 func SendFrame(conn net.Conn, iType uint8, flags uint8, streamID uint32, data []byte) error {
@@ -56,6 +59,7 @@ func NewResponse(conn net.Conn, streamID uint32) *Response {
 	res := &Response{
 		header:             http.Header{},
 		connection:         conn,
+		enc:                hpack.NewEncoder(4096),
 		headerWritten:      false,
 		preventFutureReads: false,
 		lastStreamID:       streamID,
@@ -88,15 +92,6 @@ func (r *Response) Write(data []byte) (int, error) {
 
 	r.preventFutureReads = true
 
-	// Terminate stream early
-	if data == nil {
-		err := SendFrame(r.connection, http2.DATA_FRAME_TYPE, http2.END_STREAM, r.lastStreamID, nil)
-		if err != nil {
-			return 0, fmt.Errorf("send frame failed: %w", err)
-		}
-		return 0, nil
-	}
-
 	r.body = append(r.body, data...)
 
 	var wrote int
@@ -104,14 +99,14 @@ func (r *Response) Write(data []byte) (int, error) {
 
 	for toWrite != 0 {
 		if toWrite > MAX_DATA_BODY_LENGTH {
-			err := SendFrame(r.connection, http2.DATA_FRAME_TYPE, 0x00, r.lastStreamID, data[wrote:MAX_DATA_BODY_LENGTH])
+			err := SendFrame(r.connection, structs.DATA_FRAME_TYPE, 0x00, r.lastStreamID, data[wrote:wrote+MAX_DATA_BODY_LENGTH])
 			if err != nil {
 				return wrote, fmt.Errorf("send data frame failed: %w", err)
 			}
 			toWrite -= MAX_DATA_BODY_LENGTH
 			wrote += MAX_DATA_BODY_LENGTH
 		} else {
-			err := SendFrame(r.connection, http2.DATA_FRAME_TYPE, http2.END_STREAM, r.lastStreamID, data[wrote:toWrite])
+			err := SendFrame(r.connection, structs.DATA_FRAME_TYPE, structs.END_STREAM, r.lastStreamID, data[wrote:toWrite])
 			if err != nil {
 				return wrote, fmt.Errorf("send data frame failed: %w", err)
 			}
@@ -128,18 +123,17 @@ func (r *Response) WriteHeader(statusCode int) {
 
 	for key, values := range r.header {
 		for _, value := range values {
-			headers = append(headers, &hpack.Header{Name: strings.ToLower(key), Value: strings.ToLower(value)})
+			headers = append(headers, &hpack.Header{Name: strings.ToLower(key), Value: value})
 		}
 	}
 
 	headers = append(headers, &hpack.Header{Name: ":status", Value: strconv.Itoa(statusCode)})
 
 	// TODO: Pull max table size from settings??
-	enc := hpack.NewEncoder(4096)
 	var encodedHeaders bytes.Buffer
-	enc.Encode(&encodedHeaders, headers)
+	r.enc.Encode(&encodedHeaders, headers)
 
-	err := SendFrame(r.connection, http2.HEADER_FRAME_TYPE, http2.END_HEADERS, r.lastStreamID, encodedHeaders.Bytes())
+	err := SendFrame(r.connection, structs.HEADER_FRAME_TYPE, structs.END_HEADERS, r.lastStreamID, encodedHeaders.Bytes())
 	if err != nil {
 		fmt.Printf("send frame failed: %v\n", err)
 		return

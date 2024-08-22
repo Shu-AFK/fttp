@@ -7,13 +7,16 @@ import (
 	"fmt"
 	"github.com/go-chi/chi/v5"
 	hpack "github.com/tatsuhiro-t/go-http2-hpack"
+	"httpServer/internal/http2/frame"
+	"httpServer/internal/http2/structs"
 	http11 "httpServer/internal/request/http1.1"
-	http2 "httpServer/internal/request/http2"
+	"httpServer/internal/request/http2"
 	http11Response "httpServer/internal/response/http1.1"
 	http2Response "httpServer/internal/response/http2"
 	"io"
 	"net"
 	"net/http"
+	"sync"
 )
 
 var notes = make(map[string]string)
@@ -40,7 +43,7 @@ func DeleteNote(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func GetNotes(w http.ResponseWriter, r *http.Request) {
+func GetNotes(w http.ResponseWriter, _ *http.Request) {
 	if len(notes) != 0 {
 		var notesContent string
 
@@ -75,7 +78,7 @@ func GetNoteById(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func NotFoundHandler(w http.ResponseWriter, r *http.Request) {
+func NotFoundHandler(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusNotFound)
 	_, err := w.Write([]byte("Not Found"))
 	if err != nil {
@@ -83,18 +86,49 @@ func NotFoundHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func MethodNotAllowedHandler(w http.ResponseWriter, r *http.Request) {
+func MethodNotAllowedHandler(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusMethodNotAllowed)
 	_, err := w.Write([]byte("Method Not Allowed"))
 	if err != nil {
 		fmt.Printf("[METHOD NOT ALLOWED HANDLER] Response writer failed with: %s\n", err)
 	}
+}
 
-	if r.ProtoMajor == 2 {
-		_, err := w.Write(nil)
+func HandleHttp2(reader io.Reader, essential *structs.ParsingEssential) {
+	iReader := bufio.NewReader(reader)
+
+	err := HandleStreamMultiplexing(iReader, essential)
+	if err != nil {
+		return
+	}
+
+	return
+}
+
+func HandleStreamMultiplexing(reader *bufio.Reader, essential *structs.ParsingEssential) error {
+	for {
+		f, err := frame.ParseFrame(reader)
 		if err != nil {
-			fmt.Printf("[METHOD NOT ALLOWED HANDLER] Response writer failed with: %s\n", err)
+			return fmt.Errorf("cannot parse frame data: %v", err)
 		}
+
+		if f.StreamID == 0 {
+			continue
+		}
+
+		newChannel := false
+
+		if _, exists := essential.Channels[f.StreamID]; !exists {
+			comm := structs.NewCommunication(essential.Dec, essential.Mutex)
+
+			essential.Channels[f.StreamID] = comm
+			newChannel = true
+		}
+
+		if newChannel {
+			go http2.HandleMultiplexedFrameParsing(essential.Channels[f.StreamID], essential.Router, essential.Conn)
+		}
+		essential.Channels[f.StreamID].Frames <- *f
 	}
 }
 
@@ -162,31 +196,13 @@ func HandleAccept(conn net.Conn, r chi.Router) {
 			return
 		}
 
-		err = http2Response.SendSettingsFrame(tlsConn, requestReader)
+		err = http2Response.SendSettingsFrame(tlsConn)
 		if err != nil {
 			fmt.Printf("failed to send settings frame: %v\n", err)
 			return
 		}
 
-		req, err := http2.Parser(requestReader, dec)
-		if err != nil {
-			fmt.Printf("failed to parse requests: %v\n", err)
-			return
-		}
-
-		counter := 0
-		for streamId, _ := range http2.Channels {
-			req[counter].RemoteAddr = conn.RemoteAddr().String()
-
-			responseWriter := http2Response.NewResponse(conn, streamId)
-			r.ServeHTTP(responseWriter, req[counter])
-			err := http2Response.SendFrame(conn, http2.DATA_FRAME_TYPE, http2.END_STREAM, streamId, nil)
-			if err != nil {
-				fmt.Printf("failed to send frame: %v\n", err)
-			}
-
-			counter++
-		}
+		HandleHttp2(requestReader, structs.NewParsingEssential(dec, new(sync.Mutex), r, tlsConn))
 	}
 
 	fmt.Printf("handled connection from %v\n", conn.RemoteAddr())
