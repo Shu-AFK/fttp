@@ -18,7 +18,7 @@ func NewHeaderField(name string, value string, neverIndexed bool) *HeaderField {
 }
 
 func initIndexAddressSpace() *IndexAddressSpace {
-	IndexAddressSpace_ := make(IndexAddressSpace, STATIC_TABLE_SIZE)
+	IndexAddressSpace_ := make(IndexAddressSpace, 0)
 	IndexAddressSpace_ = append(IndexAddressSpace_, *NewHeaderField(":authority", "", false))
 	IndexAddressSpace_ = append(IndexAddressSpace_, *NewHeaderField(":method", "GET", false))
 	IndexAddressSpace_ = append(IndexAddressSpace_, *NewHeaderField(":method", "POST", false))

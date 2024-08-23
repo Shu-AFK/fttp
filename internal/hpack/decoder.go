@@ -8,8 +8,7 @@ import (
 )
 
 type Decoder struct {
-	Table      IndexAddressSpace
-	HeaderList []HeaderField
+	Table IndexAddressSpace
 }
 
 func NewDecoder() *Decoder {
@@ -20,6 +19,10 @@ func NewDecoder() *Decoder {
 
 func (dec *Decoder) Decode(reader *bufio.Reader) ([]HeaderField, error) {
 	headers := new([]HeaderField)
+	_, err := reader.Discard(1)
+	if err != nil {
+		return nil, err
+	}
 
 	for {
 		readByte, err := reader.ReadByte()
@@ -29,9 +32,13 @@ func (dec *Decoder) Decode(reader *bufio.Reader) ([]HeaderField, error) {
 			return *headers, fmt.Errorf("decoder error: %w", err)
 		}
 
-		if readByte&0x80 == 1 {
+		if readByte&0x80 != 0 {
 			index := readByte & 0x7F
-			*headers = append(*headers, dec.Table[index])
+			if index == 0 {
+				return *headers, fmt.Errorf("static indexes can't be 0")
+			}
+
+			*headers = append(*headers, dec.Table[index-1])
 		} else {
 			return *headers, fmt.Errorf("the decoder only supports static table indexing")
 		}

@@ -3,18 +3,18 @@ package tests
 import (
 	"bufio"
 	"bytes"
+	"encoding/hex"
+	"github.com/stretchr/testify/assert"
 	tested_hpack "github.com/tatsuhiro-t/go-http2-hpack"
 	"httpServer/internal/hpack"
 	"testing"
 )
 
 func TestDecoderStatic(t *testing.T) {
-	t.Log("Testing Decoder Static...")
-
 	headersPre := []*tested_hpack.Header{
 		tested_hpack.NewHeader(":method", "GET", false),
 		tested_hpack.NewHeader(":scheme", "https", false),
-		tested_hpack.NewHeader(":authority", "example.org", false),
+		tested_hpack.NewHeader(":path", "/", false),
 	}
 
 	dec := hpack.NewDecoder()
@@ -23,13 +23,15 @@ func TestDecoderStatic(t *testing.T) {
 	encoded := &bytes.Buffer{}
 	enc.Encode(encoded, headersPre)
 
-	headersAfter, _ := dec.Decode(bufio.NewReader(bytes.NewReader(encoded.Bytes())))
+	encBytes := encoded.Bytes()
+	t.Logf("Encoded headers: 0x%s", hex.EncodeToString(encBytes))
+
+	headersAfter, err := dec.Decode(bufio.NewReader(bytes.NewReader(encBytes)))
+	assert.NoError(t, err, "Error decoding headers after encoded payload")
+	assert.Len(t, headersAfter, len(headersPre))
+
 	for i, header := range headersAfter {
-		if header.HeaderFieldName != headersPre[i].Name {
-			t.Errorf("got header field name %s instead of %s", header.HeaderFieldName, headersPre[i].Name)
-		}
-		if header.HeaderFieldValue != headersPre[i].Value {
-			t.Errorf("got header field value %s instead of %s", header.HeaderFieldValue, headersPre[i].Value)
-		}
+		assert.Equal(t, headersPre[i].Name, header.HeaderFieldName)
+		assert.Equal(t, headersPre[i].Value, header.HeaderFieldValue)
 	}
 }
