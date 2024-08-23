@@ -32,7 +32,7 @@ func main() {
 			element = strings.TrimSpace(element)
 		}
 
-		fmt.Printf("IndexAddressSpace_[%v] = NewHeaderField(\"%v\", \"%v\", false)\n", splitLine[0], splitLine[1], splitLine[2])
+		fmt.Printf("IndexAddressSpace_ = append(IndexAddressSpace_, *NewHeaderField(\"%v\", \"%v\", false))\n", splitLine[1], splitLine[2])
 	}
 
 	if err := scanner.Err(); err != nil {

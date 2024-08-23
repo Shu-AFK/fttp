@@ -9,7 +9,7 @@ type Encoder struct {
 }
 
 func NewEncoder(dynamicTableSize ...int) *Encoder {
-	staticTable := initIndexAddressSpace()
+	staticTable := *initIndexAddressSpace()
 
 	maxTableSize := DefaultMaxDynamicTableSize
 	if len(dynamicTableSize) > 0 {
@@ -17,10 +17,10 @@ func NewEncoder(dynamicTableSize ...int) *Encoder {
 	}
 
 	dynamicTable := make(IndexAddressSpace, maxTableSize)
-	table := mergeTables(*staticTable, dynamicTable)
+	table := append(staticTable, dynamicTable...)
 
 	return &Encoder{
-		Table:               table,
+		Table:               &table,
 		MaxDynamicTableSize: maxTableSize,
 		NextIndex:           STATIC_TABLE_SIZE + 1,
 	}

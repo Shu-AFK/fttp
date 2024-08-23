@@ -1,25 +1,41 @@
 package hpack
 
-import "io"
+import (
+	"bufio"
+	"errors"
+	"fmt"
+	"io"
+)
 
 type Decoder struct {
-	Table      *IndexAddressSpace
+	Table      IndexAddressSpace
 	HeaderList []HeaderField
 }
 
 func NewDecoder() *Decoder {
 	return &Decoder{
-		Table: initIndexAddressSpace(),
+		Table: *initIndexAddressSpace(),
 	}
 }
 
-func DecodeInteger(r *io.Reader) (int64, error) {
-	var ret int64
+func (dec *Decoder) Decode(reader *bufio.Reader) ([]HeaderField, error) {
+	headers := new([]HeaderField)
 
-	return ret, nil
-}
+	for {
+		readByte, err := reader.ReadByte()
+		if errors.Is(err, io.EOF) {
+			break
+		} else if err != nil {
+			return *headers, fmt.Errorf("decoder error: %w", err)
+		}
 
-func (dec *Decoder) Decode(reader *io.Reader) error {
+		if readByte&0x80 == 1 {
+			index := readByte & 0x7F
+			*headers = append(*headers, dec.Table[index])
+		} else {
+			return *headers, fmt.Errorf("the decoder only supports static table indexing")
+		}
+	}
 
-	return nil
+	return *headers, nil
 }
