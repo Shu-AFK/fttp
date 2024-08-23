@@ -57,8 +57,9 @@ func SendFrame(conn net.Conn, iType uint8, flags uint8, streamID uint32, data []
 
 func NewResponse(conn net.Conn, streamID uint32) *Response {
 	res := &Response{
-		header:             http.Header{},
-		connection:         conn,
+		header:     http.Header{},
+		connection: conn,
+		// TODO: put enc into parsingessentials (one encoder per connection)
 		enc:                hpack.NewEncoder(4096),
 		headerWritten:      false,
 		preventFutureReads: false,

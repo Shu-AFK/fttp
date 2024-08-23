@@ -128,6 +128,11 @@ func HandleStreamMultiplexing(reader *bufio.Reader, essential *structs.ParsingEs
 		if newChannel {
 			go http2.HandleMultiplexedFrameParsing(essential.Channels[f.StreamID], essential.Router, essential.Conn)
 		}
+		select {
+		case <-essential.Channels[f.StreamID].Frames: // Channel is closed
+			continue
+		default:
+		}
 		essential.Channels[f.StreamID].Frames <- *f
 	}
 }

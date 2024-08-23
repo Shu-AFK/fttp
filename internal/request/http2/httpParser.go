@@ -211,9 +211,12 @@ Loop:
 			continue
 		}
 	}
+	close(comm.Frames)
 
 	r.Body = io.NopCloser(strings.NewReader(bodyContent))
 	go func() {
+		// TODO: response writer sollte nicht die connection nehmen sondern in einen Channel senden anstatt conn
+		// Pro conn sollte es eine go routine geben, die den channel liest und in die connection schreibt
 		responseWriter := http2.NewResponse(conn, streamID)
 		router.ServeHTTP(responseWriter, r)
 
