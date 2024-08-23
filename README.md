@@ -8,20 +8,20 @@ It also implements HTTP/1, with support for chunked encoding and pipelining.
 
 ## 2. Setup and Installation
 
-1. *Clone the repository*:
+1. **Clone the repository**:
     ```shell
       git clone https://github.com/Shu-AFK/fttp
       cd fttp
     ```
-2. *Install dependencies*: Ensure you have Go installed. Then run: 
+2. **Install dependencies**: Ensure you have Go installed. Then run: 
     ```shell
       go mod tidy
     ```
-3. *Create TLS Certificates*:
+3. **Create TLS Certificates**:
     ```shell
       go run tools/certificateGenerator/certgen.go -org "<Organisation Name>" -cn "<Domain Name>" -on "<Department Name>" -ip "<IP>" -name "<Name for the server>"
     ```
-4. *Running the Server*: Make sure to use the previously generated .pem files
+4. **Running the Server**: Make sure to use the previously generated .pem files
     ```shell
       go run main.go -cert <name>-cert.pem -key <name>-key.pem 
    ```
