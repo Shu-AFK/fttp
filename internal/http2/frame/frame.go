@@ -43,7 +43,7 @@ func NewFrame(iType uint8, flags uint8, streamID uint32, data []byte) *structs.F
 	return &structs.Frame{
 		Type:     iType,
 		Flags:    flags,
-		StreamID: streamID &^ 1 << 31,
+		StreamID: streamID,
 		Payload:  data,
 	}
 }
