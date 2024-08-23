@@ -38,3 +38,12 @@ func ParseFrame(reader *bufio.Reader) (*structs.Frame, error) {
 
 	return newFrame, nil
 }
+
+func NewFrame(iType uint8, flags uint8, streamID uint32, data []byte) *structs.Frame {
+	return &structs.Frame{
+		Type:     iType,
+		Flags:    flags,
+		StreamID: streamID &^ 1 << 31,
+		Payload:  data,
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"github.com/go-chi/chi/v5"
 	hpack "github.com/tatsuhiro-t/go-http2-hpack"
+	"net"
 	"sync"
 )
 
@@ -37,6 +38,12 @@ type ParsingEssential struct {
 	Conn     *tls.Conn
 }
 
+type ResponseEssential struct {
+	Connection net.Conn
+	Enc        *hpack.Encoder // TODO: Pull max table size from settings??
+	FrameChan  chan *Frame
+}
+
 type Frame struct {
 	Length   uint32
 	Type     uint8
@@ -67,5 +74,13 @@ func NewParsingEssential(dec *hpack.Decoder, mut *sync.Mutex, r chi.Router, conn
 		Mutex:    mut,
 		Router:   r,
 		Conn:     conn,
+	}
+}
+
+func NewResponseEssential(conn net.Conn, enc *hpack.Encoder) *ResponseEssential {
+	return &ResponseEssential{
+		Connection: conn,
+		Enc:        enc,
+		FrameChan:  make(chan *Frame),
 	}
 }

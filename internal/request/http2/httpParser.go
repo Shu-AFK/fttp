@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/go-chi/chi/v5"
 	"github.com/tatsuhiro-t/go-http2-hpack"
+	"httpServer/internal/http2/frame"
 	"httpServer/internal/http2/structs"
 	"httpServer/internal/response/http2"
 	"io"
@@ -171,7 +172,7 @@ func parseDataFrame(frame structs.Frame, bodyContent *string) (bool, error) {
 	return true, nil
 }
 
-func HandleMultiplexedFrameParsing(comm *structs.Communication, router chi.Router, conn *tls.Conn) {
+func HandleMultiplexedFrameParsing(comm *structs.Communication, router chi.Router, conn *tls.Conn, respEssential structs.ResponseEssential) {
 	r := new(http.Request)
 	var bodyContent string
 	var streamID uint32
@@ -214,16 +215,8 @@ Loop:
 	close(comm.Frames)
 
 	r.Body = io.NopCloser(strings.NewReader(bodyContent))
-	go func() {
-		// TODO: response writer sollte nicht die connection nehmen sondern in einen Channel senden anstatt conn
-		// Pro conn sollte es eine go routine geben, die den channel liest und in die connection schreibt
-		responseWriter := http2.NewResponse(conn, streamID)
-		router.ServeHTTP(responseWriter, r)
+	responseWriter := http2.NewResponse(conn, streamID, respEssential)
+	router.ServeHTTP(responseWriter, r)
 
-		// Close stream
-		err := http2.SendFrame(conn, structs.DATA_FRAME_TYPE, structs.END_STREAM, streamID, nil)
-		if err != nil {
-			fmt.Printf("cannot send end stream: %v", err)
-		}
-	}()
+	respEssential.FrameChan <- frame.NewFrame(structs.DATA_FRAME_TYPE, structs.END_STREAM, streamID, nil)
 }

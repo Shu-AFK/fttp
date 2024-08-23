@@ -94,10 +94,10 @@ func MethodNotAllowedHandler(w http.ResponseWriter, _ *http.Request) {
 	}
 }
 
-func HandleHttp2(reader io.Reader, essential *structs.ParsingEssential) {
+func HandleHttp2(reader io.Reader, essential *structs.ParsingEssential, respEssential structs.ResponseEssential) {
 	iReader := bufio.NewReader(reader)
 
-	err := HandleStreamMultiplexing(iReader, essential)
+	err := HandleStreamMultiplexing(iReader, essential, respEssential)
 	if err != nil {
 		return
 	}
@@ -105,7 +105,7 @@ func HandleHttp2(reader io.Reader, essential *structs.ParsingEssential) {
 	return
 }
 
-func HandleStreamMultiplexing(reader *bufio.Reader, essential *structs.ParsingEssential) error {
+func HandleStreamMultiplexing(reader *bufio.Reader, essential *structs.ParsingEssential, respEssential structs.ResponseEssential) error {
 	for {
 		f, err := frame.ParseFrame(reader)
 		if err != nil {
@@ -126,7 +126,7 @@ func HandleStreamMultiplexing(reader *bufio.Reader, essential *structs.ParsingEs
 		}
 
 		if newChannel {
-			go http2.HandleMultiplexedFrameParsing(essential.Channels[f.StreamID], essential.Router, essential.Conn)
+			go http2.HandleMultiplexedFrameParsing(essential.Channels[f.StreamID], essential.Router, essential.Conn, respEssential)
 		}
 		select {
 		case <-essential.Channels[f.StreamID].Frames: // Channel is closed
@@ -207,7 +207,10 @@ func HandleAccept(conn net.Conn, r chi.Router) {
 			return
 		}
 
-		HandleHttp2(requestReader, structs.NewParsingEssential(dec, new(sync.Mutex), r, tlsConn))
+		respEssential := structs.NewResponseEssential(conn, hpack.NewEncoder(4096))
+		go http2Response.SendFrames(*respEssential)
+
+		HandleHttp2(requestReader, structs.NewParsingEssential(dec, new(sync.Mutex), r, tlsConn), *respEssential)
 	}
 
 	fmt.Printf("handled connection from %v\n", conn.RemoteAddr())
