@@ -3,11 +3,12 @@ package structs
 import (
 	"httpServer/internal/logging"
 	"net"
+	"net/url"
 )
 
 type ProxyRoute struct {
 	Path   string
-	Target net.IP
+	Target *url.URL
 }
 
 type ProxyHandler interface {

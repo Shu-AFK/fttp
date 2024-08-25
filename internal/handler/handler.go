@@ -2,12 +2,14 @@ package handler
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"sync"
 
 	"github.com/go-chi/chi/v5"
@@ -43,9 +45,123 @@ func MethodNotAllowedHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// ReverseProxyHandler TODO: Not implemented
+func resolveRoute(route []proxystructs.ProxyRoute, path string) *url.URL {
+	for _, route := range route {
+		if route.Path == path {
+			return route.Target
+		}
+	}
+
+	return nil
+}
+
+/* TODO: Finish
+func loadSystemCAs() *x509.CertPool {
+	Proxy.Log(logging.LogLevelDebug, "Loading system certificates")
+	var certPool *x509.CertPool
+	var err error
+
+	if runtime.GOOS == "windows" {
+		// On Windows, use the system certificate pool
+		certPool, err = x509.SystemCertPool()
+		if err != nil {
+			Proxy.Log(logging.LogLevelError, "Failed to load system CA certificates on Windows: %v", err)
+			return nil
+		}
+		Proxy.Log(logging.LogLevelDebug, "System certificate pool loaded on Windows")
+	} else {
+		// On Unix-like systems, manually load the certificate bundle
+		systemCerts, err := os.ReadFile("/etc/ssl/certs/ca-certificates.crt")
+		if err != nil {
+			if os.IsNotExist(err) {
+				Proxy.Log(logging.LogLevelError, "System CA cert file not found, please ensure your system has CA certificates installed.")
+			} else {
+				Proxy.Log(logging.LogLevelError, "Failed to load system CA certificates: %v", err)
+			}
+			return nil
+		}
+
+		certPool = x509.NewCertPool()
+		if ok := certPool.AppendCertsFromPEM(systemCerts); !ok {
+			Proxy.Log(logging.LogLevelError, "Failed to append system CA certificates")
+			return nil
+		}
+	}
+
+	if certPool == nil || len(certPool.Subjects()) == 0 {
+		Proxy.Log(logging.LogLevelError, "Loaded certificate pool is empty")
+		return nil // Return nil in case of failure
+	}
+
+	Proxy.Log(logging.LogLevelDebug, "Successfully loaded system CA certificates")
+	return certPool
+} */
+
 func ReverseProxyHandler(w http.ResponseWriter, r *http.Request) {
-	Proxy.Log(logging.LogLevelWarn, "Not implemented yet")
+	forwardTo := resolveRoute(Proxy.GetRoutes(), r.URL.Path)
+	if forwardTo == nil {
+		Proxy.Log(logging.LogLevelWarn, "Forwarding to nil target: %s %s", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusBadGateway)
+		return
+	}
+
+	req, err := http.NewRequest(r.Method, forwardTo.String(), r.Body)
+	if err != nil {
+		Proxy.Log(logging.LogLevelError, "New request creation failed in ReverseProxyHandler: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	req.Header = r.Header.Clone()
+
+	// Setting up HTTP client with system CA certificates
+	/* TODO: Uncomment when loadSystemCAs works
+	client := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				RootCAs: loadSystemCAs(),
+			},
+		},
+	}
+	*/
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: true,
+			},
+		},
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		Proxy.Log(logging.LogLevelError, "Request forwarding failed in ReverseProxyHandler: %v", err)
+		w.WriteHeader(http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	for name, values := range resp.Header {
+		for _, value := range values {
+			w.Header().Add(name, value)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	Proxy.Log(logging.LogLevelDebug, "Received status code: %d", resp.StatusCode)
+
+	var buffer bytes.Buffer
+	_, err = io.Copy(&buffer, resp.Body)
+	if err != nil {
+		Proxy.Log(logging.LogLevelError, "Response body copy failed in ReverseProxyHandler: %v", err)
+		return
+	}
+
+	_, err = w.Write(buffer.Bytes())
+	if err != nil {
+		Proxy.Log(logging.LogLevelError, "Response writer failed in ReverseProxyHandler: %v", err)
+		return
+	}
+
+	Proxy.Log(logging.LogLevelDebug, "Reverse proxy handler finished")
 }
 
 func HandleHttp2(reader io.Reader, essential *structs.ParsingEssential, respEssential structs.ResponseEssential) {

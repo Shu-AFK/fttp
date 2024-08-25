@@ -4,7 +4,9 @@ import (
 	"crypto/tls"
 	"fmt"
 	"httpServer/internal/logging"
+	"log"
 	"net"
+	"net/url"
 	"strings"
 	"time"
 
@@ -28,16 +30,44 @@ func NewReverseProxy(configPath string) *Proxy {
 		panic(err)
 	}
 
-	if err := conf.Validate(); err != nil {
-		panic(err)
-	}
-
-	// Parse routes
 	var routes []structs.ProxyRoute
 	for _, route := range conf.Server.Routes {
+		parsedTarget, err := url.Parse(route.Target)
+		if err != nil {
+			log.Fatalf("Failed to parse target URL %s: %v", route.Target, err)
+		}
+
+		hostname := parsedTarget.Hostname()
+		IPs, err := net.LookupIP(hostname)
+		if err != nil {
+			log.Fatalf("Failed to resolve IP for target %s: %v", hostname, err)
+		}
+
+		if len(IPs) == 0 {
+			log.Fatalf("No IP addresses found for target %s", hostname)
+		}
+
+		ip := IPs[0]
+		resolvedHost := ip.String()
+		if ip.To4() == nil {
+			// This is an IPv6 address, enclose it in brackets
+			resolvedHost = fmt.Sprintf("[%s]", resolvedHost)
+		}
+
+		// Reconstruct the target URL with the resolved IP
+		resolvedURL := fmt.Sprintf("%s://%s", parsedTarget.Scheme, resolvedHost)
+		if parsedTarget.Port() != "" {
+			resolvedURL = fmt.Sprintf("%s:%s", resolvedURL, parsedTarget.Port())
+		}
+
+		parsedURL, err := url.Parse(resolvedURL)
+		if err != nil {
+			log.Fatalf("Failed to parse resolved target URL %s: %v", resolvedURL, err)
+		}
+
 		routes = append(routes, structs.ProxyRoute{
 			Path:   route.Path,
-			Target: net.ParseIP(route.Target),
+			Target: parsedURL,
 		})
 	}
 
