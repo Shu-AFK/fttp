@@ -55,15 +55,13 @@ func SendFrame(conn net.Conn, iType uint8, flags uint8, streamID uint32, data []
 }
 
 func NewResponse(conn net.Conn, streamID uint32, essential structs.ResponseEssential) *Response {
-	res := &Response{
+	return &Response{
 		header:             http.Header{},
 		essential:          essential,
 		headerWritten:      false,
 		preventFutureReads: false,
 		lastStreamID:       streamID,
 	}
-
-	return res
 }
 
 func (r *Response) SetMaxTableSize(s int) {

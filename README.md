@@ -17,7 +17,7 @@ It also implements HTTP/1, with support for chunked encoding and pipelining.
     ```shell
       go mod tidy
     ```
-3. **Create TLS Certificates**:
+3. **Generate TLS Certificates**:
     ```shell
       go run tools/certificateGenerator/certgen.go -org "<Organisation Name>" -cn "<Domain Name>" -on "<Department Name>" -ip "<IP>" -name "<Name for the server>"
     ```
