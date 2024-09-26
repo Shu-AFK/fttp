@@ -14,7 +14,6 @@ import (
 
 var ChunkEncodingError = errors.New("chunked encoding was not at the end of the transfer encodings")
 
-/****** HTTP1.1 ******/
 func parseStartLine(reader *bufio.Reader, req *http.Request) error {
 	startLine, err := reader.ReadString('\n')
 	if err != nil {
@@ -203,12 +202,9 @@ func parseBody(reader *bufio.Reader, req *http.Request) error {
 	return nil
 }
 
-/****** end of HTTP1.1 ******/
-
 func Parser(reader *bufio.Reader) (*http.Request, error, bool) {
 	r := http.Request{}
 
-	/****** HTTP1.1 ******/
 	err := parseStartLine(reader, &r)
 	if err != nil {
 		return nil, err, false
@@ -223,7 +219,6 @@ func Parser(reader *bufio.Reader) (*http.Request, error, bool) {
 	if err != nil {
 		return nil, err, false
 	}
-	/****** end of HTTP1.1 ******/
 
 	if r.Header.Get("Connection") == "keep-alive" || (r.Header.Get("Connection") == "" && r.ProtoMinor == 1) {
 		return &r, nil, true

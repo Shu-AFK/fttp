@@ -23,7 +23,7 @@ It also implements HTTP/1, with support for chunked encoding and pipelining.
     ```
 4. **Running the Server**: Make sure to use the previously generated .pem files
     ```shell
-      go run main.go -cert <name>-cert.pem -key <name>-key.pem 
+      go run main.go -cert <name>-cert.pem -key <name>-key.pem -config <name>.yaml
    ```
 
 ## 3. License

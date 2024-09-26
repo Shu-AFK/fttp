@@ -4,12 +4,16 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"runtime"
+	"strings"
 	"sync"
 
 	"github.com/go-chi/chi/v5"
@@ -55,7 +59,7 @@ func resolveRoute(route []proxystructs.ProxyRoute, path string) *url.URL {
 	return nil
 }
 
-/* TODO: Finish
+// TODO: Finish
 func loadSystemCAs() *x509.CertPool {
 	Proxy.Log(logging.LogLevelDebug, "Loading system certificates")
 	var certPool *x509.CertPool
@@ -95,7 +99,7 @@ func loadSystemCAs() *x509.CertPool {
 
 	Proxy.Log(logging.LogLevelDebug, "Successfully loaded system CA certificates")
 	return certPool
-} */
+}
 
 func ReverseProxyHandler(w http.ResponseWriter, r *http.Request) {
 	forwardTo := resolveRoute(Proxy.GetRoutes(), r.URL.Path)
@@ -164,7 +168,7 @@ func ReverseProxyHandler(w http.ResponseWriter, r *http.Request) {
 	Proxy.Log(logging.LogLevelDebug, "Reverse proxy handler finished")
 }
 
-func HandleHttp2(reader io.Reader, essential *structs.ParsingEssential, respEssential structs.ResponseEssential) {
+func Http2IntermediateHandler(reader io.Reader, essential *structs.ParsingEssential, respEssential structs.ResponseEssential) {
 	Proxy.Log(logging.LogLevelInfo, "Starting HTTP/2 handling")
 
 	iReader := bufio.NewReader(reader)
@@ -264,8 +268,13 @@ func HandleHTTP11(conn net.Conn, r chi.Router) {
 	var err error
 
 	for {
+		// TODO: Turn into a go routine in order
 		req, err, moreRequests = http11.Parser(requestReader)
 		if err != nil {
+			if strings.Contains(err.Error(), "EOF") {
+				proxy.Log(logging.LogLevelDebug, "Client %v closed the connection", conn.RemoteAddr())
+				return
+			}
 			if errors.Is(err, http11.ChunkEncodingError) {
 				sendBadRequest = true
 				proxy.Log(logging.LogLevelWarn, "Chunk encoding error for %v: %v", conn.RemoteAddr(), err)
@@ -314,5 +323,5 @@ func HandleHTTP2(tlsConn *tls.Conn, r chi.Router) {
 	respEssential := structs.NewResponseEssential(tlsConn, hpack.NewEncoder(4096))
 	go http2Response.SendFrames(*respEssential)
 
-	HandleHttp2(requestReader, structs.NewParsingEssential(dec, new(sync.Mutex), r, tlsConn), *respEssential)
+	Http2IntermediateHandler(requestReader, structs.NewParsingEssential(dec, new(sync.Mutex), r, tlsConn), *respEssential)
 }
