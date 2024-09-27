@@ -3,6 +3,7 @@ package reverseproxy
 import (
 	"crypto/tls"
 	"fmt"
+	"httpServer/internal/cache"
 	"httpServer/internal/logging"
 	"log"
 	"net"
@@ -82,6 +83,11 @@ func NewReverseProxy(configPath string) *Proxy {
 	logger, err := logging.NewDefaultLogger(logging.LogLevel(strings.ToUpper(conf.Logger.Level)), conf.Logger.File)
 	if err != nil {
 		panic(err)
+	}
+
+	if conf.Caching.Enabled {
+		cachingTTL := time.Duration(conf.Caching.TTL) * time.Second
+		cache.InitCache(cachingTTL)
 	}
 
 	return &Proxy{
