@@ -2,9 +2,13 @@ server:
   port: 8080
   routes:
     - path: "/api/v1"
-      target: "http://localhost:3000/api/v1"
+      host: "http://127.0.0.1:3000"
+      target_path: "/api/v1"
     - path: "/api/v2"
-      target: "http://localhost:3000/api/v2"
+      host: "http://127.0.0.1:3000"
+      target_path: "/api/v2"
+add_header:
+  ABC: ["abc"]
 caching:
   enabled: true
   ttl: 3600

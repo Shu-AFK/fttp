@@ -3,12 +3,14 @@ package structs
 import (
 	"httpServer/internal/logging"
 	"net"
+	"net/http"
 	"net/url"
 )
 
 type ProxyRoute struct {
-	Path   string
-	Target *url.URL
+	Path       string
+	Host       *url.URL
+	TargetPath string
 }
 
 type ProxyHandler interface {
@@ -18,4 +20,5 @@ type ProxyHandler interface {
 	GetRoutes() []ProxyRoute
 	IsCachingActive() bool
 	GetBlacklist() []net.IP
+	GetAddedHeaders() http.Header
 }

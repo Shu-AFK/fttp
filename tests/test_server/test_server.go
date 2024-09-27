@@ -25,7 +25,13 @@ func loggingHandler(next http.HandlerFunc) http.HandlerFunc {
 
 func main() {
 	http.HandleFunc("/api/v1", loggingHandler(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNoContent) // changed this line
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	http.HandleFunc("/api/v2", loggingHandler(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	http.Handle("/", loggingHandler(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
 	}))
 
 	http.ListenAndServe(":3000", nil)

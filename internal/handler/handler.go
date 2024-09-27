@@ -49,10 +49,10 @@ func MethodNotAllowedHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func resolveRoute(route []proxystructs.ProxyRoute, path string) *url.URL {
+func resolveRoute(route []proxystructs.ProxyRoute, path string) *proxystructs.ProxyRoute {
 	for _, route := range route {
 		if route.Path == path {
-			return route.Target
+			return &route
 		}
 	}
 
@@ -102,20 +102,38 @@ func loadSystemCAs() *x509.CertPool {
 }
 
 func ReverseProxyHandler(w http.ResponseWriter, r *http.Request) {
-	forwardTo := resolveRoute(Proxy.GetRoutes(), r.URL.Path)
-	if forwardTo == nil {
+	forwardRoute := resolveRoute(Proxy.GetRoutes(), r.URL.Path)
+	if forwardRoute == nil {
 		Proxy.Log(logging.LogLevelWarn, "Forwarding to nil target: %s %s", r.Method, r.URL.Path)
 		w.WriteHeader(http.StatusBadGateway)
 		return
 	}
 
-	req, err := http.NewRequest(r.Method, forwardTo.String(), r.Body)
+	targetURL := forwardRoute.Host.ResolveReference(&url.URL{Path: forwardRoute.TargetPath})
+
+	req, err := http.NewRequest(r.Method, targetURL.String(), r.Body)
 	if err != nil {
 		Proxy.Log(logging.LogLevelError, "New request creation failed in ReverseProxyHandler: %v", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 	req.Header = r.Header.Clone()
+
+	ip, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		Proxy.Log(logging.LogLevelError, "Failed to parse remote address: %s %v", r.RemoteAddr, err)
+		return
+	}
+	if prior := req.Header.Get("X-Forwarded-For"); prior != "" {
+		ip = prior + ", " + ip
+	}
+	req.Header.Set("X-Forwarded-For", ip)
+
+	for key, values := range Proxy.GetAddedHeaders() {
+		for _, value := range values {
+			req.Header.Add(key, value)
+		}
+	}
 
 	// Setting up HTTP client with system CA certificates
 	/* TODO: Uncomment when loadSystemCAs works

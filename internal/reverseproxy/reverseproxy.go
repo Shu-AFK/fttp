@@ -6,6 +6,7 @@ import (
 	"httpServer/internal/logging"
 	"log"
 	"net"
+	"net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -18,6 +19,7 @@ import (
 type Proxy struct {
 	Port          uint16
 	Routes        []structs.ProxyRoute
+	AddedHeaders  http.Header
 	CachingActive bool
 	CachingTTL    time.Duration
 	Blacklist     []net.IP
@@ -32,19 +34,19 @@ func NewReverseProxy(configPath string) *Proxy {
 
 	var routes []structs.ProxyRoute
 	for _, route := range conf.Server.Routes {
-		parsedTarget, err := url.Parse(route.Target)
+		parsedHost, err := url.Parse(route.Host)
 		if err != nil {
-			log.Fatalf("Failed to parse target URL %s: %v", route.Target, err)
+			log.Fatalf("Failed to parse host URL %s: %v", route.Host, err)
 		}
 
-		hostname := parsedTarget.Hostname()
+		hostname := parsedHost.Hostname()
 		IPs, err := net.LookupIP(hostname)
 		if err != nil {
-			log.Fatalf("Failed to resolve IP for target %s: %v", hostname, err)
+			log.Fatalf("Failed to resolve IP for host %s: %v", hostname, err)
 		}
 
 		if len(IPs) == 0 {
-			log.Fatalf("No IP addresses found for target %s", hostname)
+			log.Fatalf("No IP addresses found for host %s", hostname)
 		}
 
 		ip := IPs[0]
@@ -53,21 +55,21 @@ func NewReverseProxy(configPath string) *Proxy {
 			// This is an IPv6 address, enclose it in brackets
 			resolvedHost = fmt.Sprintf("[%s]", resolvedHost)
 		}
-
-		// Reconstruct the target URL with the resolved IP
-		resolvedURL := fmt.Sprintf("%s://%s", parsedTarget.Scheme, resolvedHost)
-		if parsedTarget.Port() != "" {
-			resolvedURL = fmt.Sprintf("%s:%s", resolvedURL, parsedTarget.Port())
+		// Reconstruct the host URL with the resolved IP
+		resolvedURL := fmt.Sprintf("%s://%s", parsedHost.Scheme, resolvedHost)
+		if parsedHost.Port() != "" {
+			resolvedURL = fmt.Sprintf("%s:%s", resolvedURL, parsedHost.Port())
 		}
 
 		parsedURL, err := url.Parse(resolvedURL)
 		if err != nil {
-			log.Fatalf("Failed to parse resolved target URL %s: %v", resolvedURL, err)
+			log.Fatalf("Failed to parse resolved host URL %s: %v", resolvedURL, err)
 		}
 
 		routes = append(routes, structs.ProxyRoute{
-			Path:   route.Path,
-			Target: parsedURL,
+			Path:       route.Path,
+			Host:       parsedURL,
+			TargetPath: route.TargetPath,
 		})
 	}
 
@@ -89,6 +91,7 @@ func NewReverseProxy(configPath string) *Proxy {
 		CachingTTL:    time.Duration(conf.Caching.TTL) * time.Second,
 		Blacklist:     blacklist,
 		Logger:        logger,
+		AddedHeaders:  conf.AddHeader,
 	}
 }
 
@@ -114,6 +117,10 @@ func (proxy *Proxy) GetBlacklist() []net.IP {
 
 func (proxy *Proxy) Log(level logging.LogLevel, message string, args ...interface{}) {
 	proxy.Logger.Log(level, message, args...)
+}
+
+func (proxy *Proxy) GetAddedHeaders() http.Header {
+	return proxy.AddedHeaders
 }
 
 func (proxy *Proxy) closeIfBlacklisted(conn net.Conn) bool {

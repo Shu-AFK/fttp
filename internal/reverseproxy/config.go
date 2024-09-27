@@ -3,12 +3,14 @@ package reverseproxy
 import (
 	"errors"
 	"gopkg.in/yaml.v2"
+	"net/http"
 	"os"
 )
 
 type Route struct {
-	Path   string `yaml:"path"`
-	Target string `yaml:"target"`
+	Path       string `yaml:"path"`
+	Host       string `yaml:"host"`
+	TargetPath string `yaml:"target_path"`
 }
 
 type ServerConfig struct {
@@ -28,6 +30,7 @@ type LoggerConfig struct {
 
 type Config struct {
 	Server    ServerConfig  `yaml:"server"`
+	AddHeader http.Header   `yaml:"add_header"`
 	Caching   CachingConfig `yaml:"caching"`
 	Blacklist []string      `yaml:"blacklist"`
 	Logger    LoggerConfig  `yaml:"logger"`
@@ -44,8 +47,11 @@ func (c *Config) Validate() error {
 		if route.Path == "" {
 			return errors.New("route path is not set")
 		}
-		if route.Target == "" {
-			return errors.New("route target is not set")
+		if route.TargetPath == "" {
+			return errors.New("route target path is not set")
+		}
+		if route.Host == "" {
+			return errors.New("route host is not set")
 		}
 	}
 	if c.Logger.Level == "" {
