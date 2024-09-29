@@ -2,15 +2,18 @@
 
 ## 1. Description
 
-This project implements a simple reverse proxy server capable of forwarding incoming 
-HTTP requests to different backend servers. The proxy server supports customizable 
-routing based on URL paths, and is designed to intelligently handle and forward client 
-HTTP/1.1 and HTTP/2 requests.
+This hobby project serves as a deep dive into understanding HTTP 
+and how a reverse proxy works by implementing from scratch a simple
+reverse proxy server, including self-written HTTP/1.1 and HTTP/2 parsers.
+FTTP is capable of forwarding incoming HTTP requests to different backend
+servers. It supports customizable routing based on URL paths and has been 
+designed to intelligently handle and forward client HTTP/1.1 
+and HTTP/2 requests.
 
-Based on the path of an incoming request, the proxy server redirects the request to a 
-specific backend server, thereby channeling different requests to different backend 
-applications. This allows your backends to remain modularized and isolated while 
-presenting a unified front via the reverse proxy.
+By evaluating the path of an incoming request, FTTP redirects the request 
+to a specific backend server. This channels different requests to different
+backend applications, allowing backends to remain modular and isolated 
+while presenting a unified front.
 
 ## 2. Setup and Installation
 
