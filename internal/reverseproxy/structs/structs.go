@@ -1,7 +1,7 @@
 package structs
 
 import (
-	"httpServer/internal/cache"
+	cache_structs "httpServer/internal/cache/structs"
 	"httpServer/internal/logging"
 	"net"
 	"net/http"
@@ -24,5 +24,5 @@ type ProxyHandler interface {
 	GetBlacklist() []net.IP
 	GetAddedHeaders() http.Header
 	GetCachingTTL() time.Duration
-	GetCachingChannels() cache.Channels
+	GetCachingChannels() cache_structs.Channels
 }

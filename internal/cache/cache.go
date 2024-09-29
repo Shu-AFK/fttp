@@ -4,53 +4,21 @@ package cache
 
 import (
 	"fmt"
+	cache_structs "httpServer/internal/cache/structs"
 	"httpServer/internal/logging"
 	"httpServer/internal/reverseproxy/structs"
-	"io"
 	"net/http"
-	"net/url"
 	"sync"
 	"time"
 )
 
-type Request struct {
-	Method     string
-	URL        *url.URL
-	RequestURI string
-	timeCached time.Time
-}
-
-type Response struct {
-	StatusCode    int
-	Body          io.ReadCloser
-	ContentLength int64
-	Header        http.Header
-}
-
-type AddToCacheStruct struct {
-	Request  http.Request
-	Response http.Response
-}
-
-type cacheStruct struct {
-	Cache map[Request]Response
-	Mutex sync.RWMutex
-}
-
-type Channels struct {
-	Requests   chan Request
-	Responses  chan Response
-	Found      chan bool
-	AddToCache chan AddToCacheStruct
-}
-
-var cache *cacheStruct
+var cache *cache_structs.CacheStruct
 var ttl time.Duration
 var proxy structs.ProxyHandler
 
-func InitCache(reverseProxy structs.ProxyHandler, channels Channels) {
-	cache = new(cacheStruct)
-	cache.Cache = make(map[Request]Response)
+func InitCache(reverseProxy structs.ProxyHandler, channels cache_structs.Channels) {
+	cache = new(cache_structs.CacheStruct)
+	cache.Cache = make(map[cache_structs.Request]cache_structs.Response)
 	cache.Mutex = sync.RWMutex{}
 
 	ttl = reverseProxy.GetCachingTTL()
@@ -68,7 +36,7 @@ func cleanupCache() {
 		time.Sleep(ttl / 2)
 		cache.Mutex.RLock()
 		for req, _ := range cache.Cache {
-			if time.Since(req.timeCached) > ttl {
+			if time.Since(req.TimeCached) > ttl {
 				delete(cache.Cache, req)
 			}
 		}
@@ -76,7 +44,7 @@ func cleanupCache() {
 	}
 }
 
-func addToCache(AddToCache chan AddToCacheStruct) {
+func addToCache(AddToCache chan cache_structs.AddToCacheStruct) {
 	for {
 		select {
 		case add := <-AddToCache:
@@ -89,7 +57,7 @@ func addToCache(AddToCache chan AddToCacheStruct) {
 	}
 }
 
-func startCaching(requests chan Request, responses chan Response, found chan bool) {
+func startCaching(requests chan cache_structs.Request, responses chan cache_structs.Response, found chan bool) {
 	for {
 		select {
 		case request := <-requests:
@@ -110,22 +78,22 @@ func startCaching(requests chan Request, responses chan Response, found chan boo
 	}
 }
 
-func turnReqToCacheRequest(request http.Request) Request {
-	return Request{
+func turnReqToCacheRequest(request http.Request) cache_structs.Request {
+	return cache_structs.Request{
 		Method:     request.Method,
 		URL:        request.URL,
 		RequestURI: request.RequestURI,
-		timeCached: time.Now(),
+		TimeCached: time.Now(),
 	}
 }
 
-func turnRespToCacheResponse(response http.Response) Response {
+func turnRespToCacheResponse(response http.Response) cache_structs.Response {
 	headerCopy := make(http.Header)
 	for k, v := range response.Header {
 		headerCopy[k] = v
 	}
 
-	return Response{
+	return cache_structs.Response{
 		StatusCode:    response.StatusCode,
 		Body:          response.Body,
 		ContentLength: response.ContentLength,

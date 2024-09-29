@@ -7,7 +7,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
-	"httpServer/internal/cache"
+	cache_structs "httpServer/internal/cache/structs"
 	"io"
 	"net"
 	"net/http"
@@ -31,9 +31,9 @@ import (
 )
 
 var Proxy proxystructs.ProxyHandler
-var Channels cache.Channels
+var Channels cache_structs.Channels
 
-func InitHandler(proxy proxystructs.ProxyHandler, channels cache.Channels) {
+func InitHandler(proxy proxystructs.ProxyHandler, channels cache_structs.Channels) {
 	Proxy = proxy
 	Channels = channels
 }

@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"httpServer/internal/cache"
+	cache_structs "httpServer/internal/cache/structs"
 	"httpServer/internal/logging"
 	"log"
 	"net"
@@ -23,7 +24,7 @@ type Proxy struct {
 	AddedHeaders    http.Header
 	CachingActive   bool
 	CachingTTL      time.Duration
-	CachingChannels cache.Channels
+	CachingChannels cache_structs.Channels
 	Blacklist       []net.IP
 	Logger          logging.Logger
 }
@@ -129,7 +130,7 @@ func (proxy *Proxy) GetCachingTTL() time.Duration {
 	return proxy.CachingTTL
 }
 
-func (proxy *Proxy) GetCachingChannels() cache.Channels {
+func (proxy *Proxy) GetCachingChannels() cache_structs.Channels {
 	return proxy.CachingChannels
 }
 
@@ -187,13 +188,13 @@ func (proxy *Proxy) Start(cert []tls.Certificate) error {
 		proxy.Log(logging.LogLevelDebug, "Added route: %s", route.Path)
 	}
 
-	var channels cache.Channels
+	var channels cache_structs.Channels
 	if proxy.CachingActive {
-		channels = cache.Channels{
-			Requests:   make(chan cache.Request),
-			Responses:  make(chan cache.Response),
+		channels = cache_structs.Channels{
+			Requests:   make(chan cache_structs.Request),
+			Responses:  make(chan cache_structs.Response),
 			Found:      make(chan bool),
-			AddToCache: make(chan cache.AddToCacheStruct),
+			AddToCache: make(chan cache_structs.AddToCacheStruct),
 		}
 		proxy.CachingChannels = channels
 		cache.InitCache(proxy, channels)
