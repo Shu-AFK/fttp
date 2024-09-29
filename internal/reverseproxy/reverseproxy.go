@@ -187,11 +187,13 @@ func (proxy *Proxy) Start(cert []tls.Certificate) error {
 		proxy.Log(logging.LogLevelDebug, "Added route: %s", route.Path)
 	}
 
+	var channels cache.Channels
 	if proxy.CachingActive {
-		channels := cache.Channels{
-			Requests:  make(chan cache.Request),
-			Responses: make(chan cache.Response),
-			Found:     make(chan bool),
+		channels = cache.Channels{
+			Requests:   make(chan cache.Request),
+			Responses:  make(chan cache.Response),
+			Found:      make(chan bool),
+			AddToCache: make(chan cache.AddToCacheStruct),
 		}
 		proxy.CachingChannels = channels
 		cache.InitCache(proxy, channels)
@@ -199,6 +201,7 @@ func (proxy *Proxy) Start(cert []tls.Certificate) error {
 
 	proxy.Log(logging.LogLevelInfo, "Listening on https://%s", ln.Addr().String())
 
+	handler.InitHandler(proxy, channels)
 	for {
 		conn, err := tlsListener.Accept()
 		if err != nil {
@@ -215,7 +218,7 @@ func (proxy *Proxy) Start(cert []tls.Certificate) error {
 
 		go func(conn net.Conn) {
 			proxy.Log(logging.LogLevelDebug, "Handling connection from %v", conn.RemoteAddr())
-			handler.HandleAccept(conn, proxy, r)
+			handler.HandleAccept(conn, r)
 		}(conn)
 	}
 }

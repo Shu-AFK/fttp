@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"httpServer/internal/cache"
 	"io"
 	"net"
 	"net/http"
@@ -30,6 +31,12 @@ import (
 )
 
 var Proxy proxystructs.ProxyHandler
+var Channels cache.Channels
+
+func InitHandler(proxy proxystructs.ProxyHandler, channels cache.Channels) {
+	Proxy = proxy
+	Channels = channels
+}
 
 func NotFoundHandler(w http.ResponseWriter, r *http.Request) {
 	Proxy.Log(logging.LogLevelWarn, "Not Found: %s %s", r.Method, r.URL.Path)
@@ -101,6 +108,7 @@ func loadSystemCAs() *x509.CertPool {
 	return certPool
 }
 
+// ReverseProxyHandler TODO: Add caching
 func ReverseProxyHandler(w http.ResponseWriter, r *http.Request) {
 	forwardRoute := resolveRoute(Proxy.GetRoutes(), r.URL.Path)
 	if forwardRoute == nil {
@@ -246,24 +254,22 @@ func HandleStreamMultiplexing(reader *bufio.Reader, essential *structs.ParsingEs
 	}
 }
 
-func HandleAccept(conn net.Conn, proxy proxystructs.ProxyHandler, r chi.Router) {
-	Proxy = proxy
-
+func HandleAccept(conn net.Conn, r chi.Router) {
 	defer func(conn net.Conn) {
 		err := conn.Close()
 		if err != nil {
-			proxy.Log(logging.LogLevelError, "Error closing connection from %v: %v", conn.RemoteAddr(), err)
+			Proxy.Log(logging.LogLevelError, "Error closing connection from %v: %v", conn.RemoteAddr(), err)
 		}
 	}(conn)
 
-	proxy.Log(logging.LogLevelInfo, "New connection from %v", conn.RemoteAddr())
+	Proxy.Log(logging.LogLevelInfo, "New connection from %v", conn.RemoteAddr())
 
 	tlsConn, ok := conn.(*tls.Conn)
 	if ok {
-		proxy.Log(logging.LogLevelDebug, "Performing TLS handshake with %v", conn.RemoteAddr())
+		Proxy.Log(logging.LogLevelDebug, "Performing TLS handshake with %v", conn.RemoteAddr())
 		err := tlsConn.Handshake()
 		if err != nil {
-			proxy.Log(logging.LogLevelError, "TLS handshake failed with %v: %v", conn.RemoteAddr(), err)
+			Proxy.Log(logging.LogLevelError, "TLS handshake failed with %v: %v", conn.RemoteAddr(), err)
 			return
 		}
 	}
@@ -274,7 +280,7 @@ func HandleAccept(conn net.Conn, proxy proxystructs.ProxyHandler, r chi.Router) 
 		HandleHTTP2(tlsConn, r)
 	}
 
-	proxy.Log(logging.LogLevelInfo, "Handled connection from %v", conn.RemoteAddr())
+	Proxy.Log(logging.LogLevelInfo, "Handled connection from %v", conn.RemoteAddr())
 }
 
 func HandleHTTP11(conn net.Conn, r chi.Router) {
