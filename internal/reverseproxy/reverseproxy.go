@@ -18,13 +18,14 @@ import (
 )
 
 type Proxy struct {
-	Port          uint16
-	Routes        []structs.ProxyRoute
-	AddedHeaders  http.Header
-	CachingActive bool
-	CachingTTL    time.Duration
-	Blacklist     []net.IP
-	Logger        logging.Logger
+	Port            uint16
+	Routes          []structs.ProxyRoute
+	AddedHeaders    http.Header
+	CachingActive   bool
+	CachingTTL      time.Duration
+	CachingChannels cache.Channels
+	Blacklist       []net.IP
+	Logger          logging.Logger
 }
 
 func NewReverseProxy(configPath string) *Proxy {
@@ -85,11 +86,6 @@ func NewReverseProxy(configPath string) *Proxy {
 		panic(err)
 	}
 
-	if conf.Caching.Enabled {
-		cachingTTL := time.Duration(conf.Caching.TTL) * time.Second
-		cache.InitCache(cachingTTL)
-	}
-
 	return &Proxy{
 		Port:          uint16(conf.Server.Port),
 		Routes:        routes,
@@ -127,6 +123,14 @@ func (proxy *Proxy) Log(level logging.LogLevel, message string, args ...interfac
 
 func (proxy *Proxy) GetAddedHeaders() http.Header {
 	return proxy.AddedHeaders
+}
+
+func (proxy *Proxy) GetCachingTTL() time.Duration {
+	return proxy.CachingTTL
+}
+
+func (proxy *Proxy) GetCachingChannels() cache.Channels {
+	return proxy.CachingChannels
 }
 
 func (proxy *Proxy) closeIfBlacklisted(conn net.Conn) bool {
@@ -181,6 +185,16 @@ func (proxy *Proxy) Start(cert []tls.Certificate) error {
 	for _, route := range proxy.Routes {
 		r.HandleFunc(route.Path, handler.ReverseProxyHandler)
 		proxy.Log(logging.LogLevelDebug, "Added route: %s", route.Path)
+	}
+
+	if proxy.CachingActive {
+		channels := cache.Channels{
+			Requests:  make(chan cache.Request),
+			Responses: make(chan cache.Response),
+			Found:     make(chan bool),
+		}
+		proxy.CachingChannels = channels
+		cache.InitCache(proxy, channels)
 	}
 
 	proxy.Log(logging.LogLevelInfo, "Listening on https://%s", ln.Addr().String())

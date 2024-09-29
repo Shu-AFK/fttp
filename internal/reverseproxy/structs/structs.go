@@ -1,10 +1,12 @@
 package structs
 
 import (
+	"httpServer/internal/cache"
 	"httpServer/internal/logging"
 	"net"
 	"net/http"
 	"net/url"
+	"time"
 )
 
 type ProxyRoute struct {
@@ -21,4 +23,6 @@ type ProxyHandler interface {
 	IsCachingActive() bool
 	GetBlacklist() []net.IP
 	GetAddedHeaders() http.Header
+	GetCachingTTL() time.Duration
+	GetCachingChannels() cache.Channels
 }
