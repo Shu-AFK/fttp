@@ -9,80 +9,80 @@ import (
 )
 
 type Response struct {
-	header             http.Header
-	body               []byte
-	connection         net.Conn
-	headerWritten      bool
-	preventFutureReads bool
+	header        http.Header
+	body          []byte
+	statusCode    int
+	connection    net.Conn
+	headerWritten bool
+	finalized     bool
 }
 
-const CONTENTSIZEMIN = 1024 * 5
-
 func NewResponse(conn net.Conn) *Response {
-	res := &Response{
-		header:             http.Header{},
-		connection:         conn,
-		headerWritten:      false,
-		preventFutureReads: false,
+	return &Response{
+		header:     http.Header{},
+		statusCode: http.StatusOK,
+		connection: conn,
 	}
-
-	return res
 }
 
 func (r *Response) Header() http.Header {
 	return r.header
 }
 
-func (r *Response) Write(data []byte) (int, error) {
-	if !r.headerWritten {
-		length := min(len(data), 512)
-
-		if r.Header().Get("Content-Type") == "" {
-			r.Header().Set("Content-Type", http.DetectContentType(data[:length]))
-		}
-		if len(data) < CONTENTSIZEMIN {
-			r.header.Set("Content-Length", strconv.Itoa(len(data)))
-		}
-
-		r.WriteHeader(http.StatusOK)
+func (r *Response) WriteHeader(statusCode int) {
+	if r.headerWritten || statusCode < 100 || statusCode >= 600 {
+		return
 	}
-
-	r.preventFutureReads = true
-	r.body = append(r.body, data...)
-	wrote, err := r.connection.Write(data)
-	if err != nil {
-		return 0, err
-	}
-
-	return wrote, nil
+	r.statusCode = statusCode
+	r.headerWritten = true
 }
 
-func (r *Response) WriteHeader(statusCode int) {
-	if statusCode < 100 || statusCode >= 600 || r.headerWritten {
-		return
+func (r *Response) Write(data []byte) (int, error) {
+	if !r.headerWritten {
+		r.WriteHeader(http.StatusOK)
+	}
+	r.body = append(r.body, data...)
+	return len(data), nil
+}
+
+// Finalize flushes the buffered status line, headers, and body to the
+// underlying connection. Called once per request after the handler returns.
+// Buffering means Content-Length is always set correctly, so the response
+// is self-framing and the connection can be reused.
+func (r *Response) Finalize() error {
+	if r.finalized {
+		return nil
+	}
+	r.finalized = true
+
+	if r.header.Get("Content-Type") == "" && len(r.body) > 0 {
+		sniff := r.body
+		if len(sniff) > 512 {
+			sniff = sniff[:512]
+		}
+		r.header.Set("Content-Type", http.DetectContentType(sniff))
+	}
+	if r.header.Get("Content-Length") == "" {
+		r.header.Set("Content-Length", strconv.Itoa(len(r.body)))
 	}
 
-	var responseLine = fmt.Sprintf("HTTP/1.1 %d %s\r\n", statusCode, http.StatusText(statusCode))
-	// Check if wrote correct
-	_, err := r.connection.Write([]byte(responseLine))
-	if err != nil {
-		return
+	statusLine := fmt.Sprintf("HTTP/1.1 %d %s\r\n", r.statusCode, http.StatusText(r.statusCode))
+	if _, err := r.connection.Write([]byte(statusLine)); err != nil {
+		return err
 	}
-
 	for key, values := range r.header {
-		headerEntry := fmt.Sprintf("%s: %s\r\n", key, strings.Join(values, ", "))
-		fmt.Print(headerEntry)
-		_, err := r.connection.Write([]byte(headerEntry))
-		if err != nil {
-			return
+		line := fmt.Sprintf("%s: %s\r\n", key, strings.Join(values, ", "))
+		if _, err := r.connection.Write([]byte(line)); err != nil {
+			return err
 		}
 	}
-
-	_, err = r.connection.Write([]byte("\r\n"))
-	if err != nil {
-		fmt.Printf("Error writing response: %v\n", err)
-		return
+	if _, err := r.connection.Write([]byte("\r\n")); err != nil {
+		return err
 	}
-
-	r.headerWritten = true
+	if len(r.body) > 0 {
+		if _, err := r.connection.Write(r.body); err != nil {
+			return err
+		}
+	}
+	return nil
 }

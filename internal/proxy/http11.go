@@ -65,6 +65,9 @@ func (p *Proxy) handleHTTP11(conn net.Conn, r chi.Router) {
 		responseWriter := http1.NewResponse(conn)
 		if sendBadRequest {
 			responseWriter.WriteHeader(http.StatusBadRequest)
+			if ferr := responseWriter.Finalize(); ferr != nil {
+				p.Log(logging.LogLevelError, "Failed to flush response to %v: %v", conn.RemoteAddr(), ferr)
+			}
 			p.Log(logging.LogLevelWarn, "[BAD REQUEST] Chunked encoding issue for %v", conn.RemoteAddr())
 			return
 		}
@@ -72,6 +75,10 @@ func (p *Proxy) handleHTTP11(conn net.Conn, r chi.Router) {
 		req.RemoteAddr = conn.RemoteAddr().String()
 		p.Log(logging.LogLevelDebug, "Serving HTTP/1.1 request from %v", conn.RemoteAddr())
 		r.ServeHTTP(responseWriter, req)
+		if ferr := responseWriter.Finalize(); ferr != nil {
+			p.Log(logging.LogLevelError, "Failed to flush response to %v: %v", conn.RemoteAddr(), ferr)
+			return
+		}
 
 		if !moreRequests {
 			break
