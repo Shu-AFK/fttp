@@ -1,4 +1,4 @@
-package reverseproxy
+package proxy
 
 import (
 	"errors"

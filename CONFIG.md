@@ -21,4 +21,4 @@ Here is a breakdown of what each segment means in the configuration file:
   - **level**: The level of log messages to capture (e.g., "debug", "info", "warn", "error").
   - **file**: The file to which logs should be written. If not provided, logs will be output to stdout.
 
-To see concrete example configs, make sure to look at the [example configs](example_configs)
+To see concrete example configs, make sure to look at the [examples](examples)

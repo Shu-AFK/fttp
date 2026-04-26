@@ -4,19 +4,18 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	hpack "github.com/tatsuhiro-t/go-http2-hpack"
-	"httpServer/internal/http2/frame"
-	"httpServer/internal/http2/structs"
 	"net"
 	"net/http"
 	"strconv"
 	"strings"
+
+	hpack "github.com/tatsuhiro-t/go-http2-hpack"
 )
 
 type Response struct {
 	header             http.Header
 	body               []byte
-	essential          structs.ResponseEssential
+	essential          ResponseEssential
 	lastStreamID       uint32
 	headerWritten      bool
 	endStreamSent      bool
@@ -43,7 +42,7 @@ func (r *Response) EndStream() {
 	if r.endStreamSent {
 		return
 	}
-	r.essential.FrameChan <- frame.NewFrame(structs.DATA_FRAME_TYPE, structs.END_STREAM, r.lastStreamID, nil)
+	r.essential.FrameChan <- NewFrame(DATA_FRAME_TYPE, END_STREAM, r.lastStreamID, nil)
 	r.endStreamSent = true
 }
 
@@ -78,7 +77,7 @@ func SendFrame(conn net.Conn, iType uint8, flags uint8, streamID uint32, data []
 	return nil
 }
 
-func NewResponse(conn net.Conn, streamID uint32, essential structs.ResponseEssential) *Response {
+func NewResponse(conn net.Conn, streamID uint32, essential ResponseEssential) *Response {
 	return &Response{
 		header:             http.Header{},
 		essential:          essential,
@@ -124,7 +123,7 @@ func (r *Response) Write(data []byte) (int, error) {
 		if end > len(data) {
 			end = len(data)
 		}
-		r.essential.FrameChan <- frame.NewFrame(structs.DATA_FRAME_TYPE, 0x00, r.lastStreamID, data[wrote:end])
+		r.essential.FrameChan <- NewFrame(DATA_FRAME_TYPE, 0x00, r.lastStreamID, data[wrote:end])
 		wrote = end
 	}
 
@@ -153,12 +152,12 @@ func (r *Response) WriteHeader(statusCode int) {
 	var encodedHeaders bytes.Buffer
 	r.essential.Enc.Encode(&encodedHeaders, headers)
 
-	r.essential.FrameChan <- frame.NewFrame(structs.HEADER_FRAME_TYPE, structs.END_HEADERS, r.lastStreamID, encodedHeaders.Bytes())
+	r.essential.FrameChan <- NewFrame(HEADER_FRAME_TYPE, END_HEADERS, r.lastStreamID, encodedHeaders.Bytes())
 
 	r.headerWritten = true
 }
 
-func SendFrames(essential structs.ResponseEssential) {
+func SendFrames(essential ResponseEssential) {
 	for f := range essential.FrameChan {
 		err := SendFrame(essential.Connection, f.Type, f.Flags, f.StreamID, f.Payload)
 		if err != nil {

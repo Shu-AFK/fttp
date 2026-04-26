@@ -1,16 +1,15 @@
-package frame
+package http2
 
 import (
 	"bufio"
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"httpServer/internal/http2/structs"
 	"io"
 )
 
-func ParseFrame(reader *bufio.Reader) (*structs.Frame, error) {
-	newFrame := new(structs.Frame)
+func ParseFrame(reader *bufio.Reader) (*Frame, error) {
+	newFrame := new(Frame)
 
 	var buffer bytes.Buffer
 	_, err := io.CopyN(&buffer, reader, 9)
@@ -39,8 +38,8 @@ func ParseFrame(reader *bufio.Reader) (*structs.Frame, error) {
 	return newFrame, nil
 }
 
-func NewFrame(iType uint8, flags uint8, streamID uint32, data []byte) *structs.Frame {
-	return &structs.Frame{
+func NewFrame(iType uint8, flags uint8, streamID uint32, data []byte) *Frame {
+	return &Frame{
 		Type:     iType,
 		Flags:    flags,
 		StreamID: streamID,

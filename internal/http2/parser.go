@@ -5,15 +5,14 @@ import (
 	"bytes"
 	"crypto/tls"
 	"fmt"
-	"github.com/go-chi/chi/v5"
-	"github.com/tatsuhiro-t/go-http2-hpack"
-	"httpServer/internal/http2/structs"
-	"httpServer/internal/response/http2"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/tatsuhiro-t/go-http2-hpack"
 )
 
 func parseHeader(key string, value string, r *http.Request) error {
@@ -42,18 +41,16 @@ func parseHeader(key string, value string, r *http.Request) error {
 	return nil
 }
 
-func parseHeaders(frame *structs.Frame, r *http.Request, dec *hpack.Decoder, mutex *sync.Mutex) error {
+func parseHeaders(frame *Frame, r *http.Request, dec *hpack.Decoder, mutex *sync.Mutex) error {
 	var buffer bytes.Buffer
 	var paddingLength uint8
 	var bytesReadAlready uint8
 
 	r.Header = make(http.Header)
 
-	// bytes.NewBuffer mit frame.Payload
 	bodyReader := bufio.NewReader(bytes.NewReader(frame.Payload))
 
-	// Padding flag set
-	if frame.Flags&structs.PADDED != 0 {
+	if frame.Flags&PADDED != 0 {
 		_, err := io.CopyN(&buffer, bodyReader, 1)
 		if err != nil {
 			return fmt.Errorf("cannot read header padding length: %v", err)
@@ -66,8 +63,7 @@ func parseHeaders(frame *structs.Frame, r *http.Request, dec *hpack.Decoder, mut
 		return fmt.Errorf("invalid header padding length: %v", paddingLength)
 	}
 
-	// Priority flag set
-	if frame.Flags&structs.HEADERS_PRIORITY != 0 {
+	if frame.Flags&HEADERS_PRIORITY != 0 {
 		_, err := bodyReader.Discard(5)
 		if err != nil {
 			return fmt.Errorf("cannot read header priority: %v", err)
@@ -113,14 +109,14 @@ func parseHeaders(frame *structs.Frame, r *http.Request, dec *hpack.Decoder, mut
 	return nil
 }
 
-func getDataFrameContent(frame *structs.Frame) ([]byte, error) {
+func getDataFrameContent(frame *Frame) ([]byte, error) {
 	var paddingLength uint8
 	var bodyContentBuffer bytes.Buffer
 	var bytesReadAlready uint8
 
 	bodyReader := bufio.NewReader(bytes.NewReader(frame.Payload))
 
-	if frame.Flags&structs.PADDED != 0 {
+	if frame.Flags&PADDED != 0 {
 		_, err := io.CopyN(&bodyContentBuffer, bodyReader, 1)
 		if err != nil {
 			return nil, fmt.Errorf("cannot read header padding length: %v", err)
@@ -139,12 +135,12 @@ func getDataFrameContent(frame *structs.Frame) ([]byte, error) {
 	return bodyContent, nil
 }
 
-func parseHeaderFrame(frame structs.Frame, r *http.Request, dec hpack.Decoder, mutex *sync.Mutex) (bool, error) {
+func parseHeaderFrame(frame Frame, r *http.Request, dec hpack.Decoder, mutex *sync.Mutex) (bool, error) {
 	var endStreamSet bool
 
-	if frame.Flags&structs.END_STREAM != 0 && frame.Type == structs.HEADER_FRAME_TYPE {
+	if frame.Flags&END_STREAM != 0 && frame.Type == HEADER_FRAME_TYPE {
 		endStreamSet = true
-	} else if frame.Flags&structs.END_STREAM != 0 && frame.Type == structs.CONTINUATION_FRAME_TYPE {
+	} else if frame.Flags&END_STREAM != 0 && frame.Type == CONTINUATION_FRAME_TYPE {
 		return false, fmt.Errorf("invalid frame, continuation frame with end stream flag")
 	}
 
@@ -156,7 +152,7 @@ func parseHeaderFrame(frame structs.Frame, r *http.Request, dec hpack.Decoder, m
 	return !endStreamSet, nil
 }
 
-func parseDataFrame(frame structs.Frame, bodyContent *string) (bool, error) {
+func parseDataFrame(frame Frame, bodyContent *string) (bool, error) {
 	content, err := getDataFrameContent(&frame)
 	if err != nil {
 		return false, fmt.Errorf("cannot read frame content: %v", err)
@@ -164,14 +160,14 @@ func parseDataFrame(frame structs.Frame, bodyContent *string) (bool, error) {
 
 	*bodyContent += string(content)
 
-	if frame.Flags&structs.END_STREAM != 0 {
+	if frame.Flags&END_STREAM != 0 {
 		return false, nil
 	}
 
 	return true, nil
 }
 
-func HandleMultiplexedFrameParsing(comm *structs.Communication, router chi.Router, conn *tls.Conn, respEssential structs.ResponseEssential) {
+func HandleMultiplexedFrameParsing(comm *Communication, router chi.Router, conn *tls.Conn, respEssential ResponseEssential) {
 	r := new(http.Request)
 	var bodyContent string
 	var streamID uint32
@@ -186,9 +182,9 @@ Loop:
 			streamID = frame.StreamID
 		}
 		switch frame.Type {
-		case structs.CONTINUATION_FRAME_TYPE:
+		case CONTINUATION_FRAME_TYPE:
 			fallthrough
-		case structs.HEADER_FRAME_TYPE:
+		case HEADER_FRAME_TYPE:
 			moreFrames, err := parseHeaderFrame(frame, r, *dec, comm.Mutex)
 			if err != nil {
 				fmt.Println("cannot parse header frame")
@@ -197,7 +193,7 @@ Loop:
 			if !moreFrames {
 				break Loop
 			}
-		case structs.DATA_FRAME_TYPE:
+		case DATA_FRAME_TYPE:
 			moreFrames, err := parseDataFrame(frame, &bodyContent)
 			if err != nil {
 				fmt.Printf("cannot parse frame content: %v", err)
@@ -217,7 +213,7 @@ Loop:
 	if r.URL == nil {
 		r.URL = &url.URL{}
 	}
-	responseWriter := http2.NewResponse(conn, streamID, respEssential)
+	responseWriter := NewResponse(conn, streamID, respEssential)
 	router.ServeHTTP(responseWriter, r)
 	responseWriter.EndStream()
 }

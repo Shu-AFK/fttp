@@ -1,4 +1,4 @@
-package cache_structs
+package cache
 
 import (
 	"io"

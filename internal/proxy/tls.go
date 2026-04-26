@@ -1,4 +1,4 @@
-package helper
+package proxy
 
 import (
 	"crypto/tls"

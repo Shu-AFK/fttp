@@ -1,4 +1,4 @@
-package http1_1
+package http1
 
 import (
 	"bufio"

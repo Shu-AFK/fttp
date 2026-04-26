@@ -28,10 +28,10 @@ while presenting a unified front.
     ```
 3. **Generate TLS Certificates**: (Optional)
     ```shell
-      go run tools/certificateGenerator/certgen.go -org "<Organisation Name>" -cn "<Domain Name>" -on "<Department Name>" -ip "<IP>" -name "<Name for the server>"
+      go run ./tools/certgen -org "<Organisation Name>" -cn "<Domain Name>" -on "<Department Name>" -ip "<IP>" -name "<Name for the server>"
     ```
 4. **Configure the Reverse Proxy**:
-   To see all the options, take a look at the configs in the [example configs](example_configs/) or reference [CONFIG.md](CONFIG.md)
+   To see all the options, take a look at the configs in the [examples](examples/) or reference [CONFIG.md](CONFIG.md)
 5. **Running the Reverse Proxy**:
     ```shell
       go run main.go -cert <name>-cert.pem -key <name>-key.pem -config <name>.yaml

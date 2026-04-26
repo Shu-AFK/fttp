@@ -3,8 +3,8 @@ package main
 import (
 	"flag"
 	"fmt"
-	"httpServer/internal/helper"
-	"httpServer/internal/reverseproxy"
+
+	"httpServer/internal/proxy"
 )
 
 func main() {
@@ -18,14 +18,13 @@ func main() {
 		panic("Certification, key and config file args are required!")
 	}
 
-	cert, err := helper.LoadCertificates(*certPath, *keyPath)
+	cert, err := proxy.LoadCertificates(*certPath, *keyPath)
 	if err != nil {
 		panic(fmt.Errorf("failed to load certificates: %v", err))
 	}
 
-	proxy := reverseproxy.NewReverseProxy(*configFile)
-	err = proxy.Start(cert)
-	if err != nil {
+	p := proxy.New(*configFile)
+	if err := p.Start(cert); err != nil {
 		fmt.Printf("failed to start proxy: %v", err)
 		return
 	}

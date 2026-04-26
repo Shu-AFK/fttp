@@ -4,27 +4,33 @@ package cache
 
 import (
 	"fmt"
-	cache_structs "httpServer/internal/cache/structs"
-	"httpServer/internal/logging"
-	"httpServer/internal/reverseproxy/structs"
 	"net/http"
 	"sync"
 	"time"
+
+	"httpServer/internal/logging"
 )
 
-var cache *cache_structs.CacheStruct
-var ttl time.Duration
-var proxy structs.ProxyHandler
+// Host is the narrow interface the cache needs from its caller. Defined here
+// (rather than in the proxy package) so cache stays import-cycle free.
+type Host interface {
+	Log(level logging.LogLevel, format string, args ...interface{})
+	GetCachingTTL() time.Duration
+}
 
-func InitCache(reverseProxy structs.ProxyHandler, channels cache_structs.Channels) {
-	cache = new(cache_structs.CacheStruct)
-	cache.Cache = make(map[cache_structs.Request]cache_structs.Response)
+var cache *CacheStruct
+var ttl time.Duration
+var host Host
+
+func InitCache(h Host, channels Channels) {
+	cache = new(CacheStruct)
+	cache.Cache = make(map[Request]Response)
 	cache.Mutex = sync.RWMutex{}
 
-	ttl = reverseProxy.GetCachingTTL()
-	proxy = reverseProxy
+	ttl = h.GetCachingTTL()
+	host = h
 
-	proxy.Log(logging.LogLevelDebug, "Starting Cache")
+	host.Log(logging.LogLevelDebug, "Starting Cache")
 	go startCaching(channels.Requests, channels.Responses, channels.Found)
 	go cleanupCache()
 	go addToCache(channels.AddToCache)
@@ -35,7 +41,7 @@ func cleanupCache() {
 	for {
 		time.Sleep(ttl / 2)
 		cache.Mutex.RLock()
-		for req, _ := range cache.Cache {
+		for req := range cache.Cache {
 			if time.Since(req.TimeCached) > ttl {
 				delete(cache.Cache, req)
 			}
@@ -44,42 +50,34 @@ func cleanupCache() {
 	}
 }
 
-func addToCache(AddToCache chan cache_structs.AddToCacheStruct) {
-	for {
-		select {
-		case add := <-AddToCache:
-			outRequest := turnReqToCacheRequest(add.Request)
-			outResponse := turnRespToCacheResponse(add.Response)
-			cache.Mutex.RLock()
-			cache.Cache[outRequest] = outResponse
-			cache.Mutex.RUnlock()
+func addToCache(in chan AddToCacheStruct) {
+	for add := range in {
+		outRequest := turnReqToCacheRequest(add.Request)
+		outResponse := turnRespToCacheResponse(add.Response)
+		cache.Mutex.RLock()
+		cache.Cache[outRequest] = outResponse
+		cache.Mutex.RUnlock()
+	}
+}
+
+func startCaching(requests chan Request, responses chan Response, found chan bool) {
+	for request := range requests {
+		cache.Mutex.RLock()
+		val, ok := cache.Cache[request]
+		cache.Mutex.RUnlock()
+		if ok {
+			host.Log(logging.LogLevelDebug, fmt.Sprintf("Cache hit for request: %s", request.URL.String()))
+			found <- true
+			responses <- val
+		} else {
+			host.Log(logging.LogLevelDebug, fmt.Sprintf("Cache miss for request: %s", request.URL.String()))
+			found <- false
 		}
 	}
 }
 
-func startCaching(requests chan cache_structs.Request, responses chan cache_structs.Response, found chan bool) {
-	for {
-		select {
-		case request := <-requests:
-			cache.Mutex.RLock()
-			val, ok := cache.Cache[request]
-			cache.Mutex.RUnlock()
-			if ok {
-				proxy.Log(logging.LogLevelDebug, fmt.Sprintf("Cache hit for request: %s", request.URL.String()))
-				found <- true
-				responses <- val
-			}
-
-			if !ok {
-				proxy.Log(logging.LogLevelDebug, fmt.Sprintf("Cache miss for request: %s", request.URL.String()))
-				found <- false
-			}
-		}
-	}
-}
-
-func turnReqToCacheRequest(request http.Request) cache_structs.Request {
-	return cache_structs.Request{
+func turnReqToCacheRequest(request http.Request) Request {
+	return Request{
 		Method:     request.Method,
 		URL:        request.URL,
 		RequestURI: request.RequestURI,
@@ -87,13 +85,13 @@ func turnReqToCacheRequest(request http.Request) cache_structs.Request {
 	}
 }
 
-func turnRespToCacheResponse(response http.Response) cache_structs.Response {
+func turnRespToCacheResponse(response http.Response) Response {
 	headerCopy := make(http.Header)
 	for k, v := range response.Header {
 		headerCopy[k] = v
 	}
 
-	return cache_structs.Response{
+	return Response{
 		StatusCode:    response.StatusCode,
 		Body:          response.Body,
 		ContentLength: response.ContentLength,

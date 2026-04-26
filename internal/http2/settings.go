@@ -5,8 +5,6 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"httpServer/internal/http2/frame"
-	"httpServer/internal/http2/structs"
 	"io"
 	"net"
 )
@@ -30,12 +28,12 @@ func SendSettingsFrame(conn net.Conn) error {
 	binary.BigEndian.PutUint16(data[:2], uint16(SETTINGS_HEADER_TABLE_SIZE))
 	binary.BigEndian.PutUint32(data[2:], 4096)
 
-	err := SendFrame(conn, structs.SETTINGS_FRAME_TYPE, 0, 0, data)
+	err := SendFrame(conn, SETTINGS_FRAME_TYPE, 0, 0, data)
 	if err != nil {
 		return fmt.Errorf("error writing settings frame: %w", err)
 	}
 
-	err = SendFrame(conn, structs.SETTINGS_FRAME_TYPE, structs.ACK, 0, nil)
+	err = SendFrame(conn, SETTINGS_FRAME_TYPE, ACK, 0, nil)
 	if err != nil {
 		return fmt.Errorf("error writing second settings frame: %w", err)
 	}
@@ -43,10 +41,10 @@ func SendSettingsFrame(conn net.Conn) error {
 	return nil
 }
 
-func validateSettingsFrame(frame *structs.Frame, ackExpected bool) error {
-	if frame.Type == structs.WINDOW_UPDATE_FRAME_TYPE {
+func validateSettingsFrame(frame *Frame, ackExpected bool) error {
+	if frame.Type == WINDOW_UPDATE_FRAME_TYPE {
 		return parseNewFrame
-	} else if frame.Type != structs.SETTINGS_FRAME_TYPE {
+	} else if frame.Type != SETTINGS_FRAME_TYPE {
 		return fmt.Errorf("invalid frame type, needs to be a settings frame: %v", frame.Type)
 	}
 
@@ -59,7 +57,7 @@ func validateSettingsFrame(frame *structs.Frame, ackExpected bool) error {
 	}
 
 	if ackExpected {
-		if frame.Flags&structs.ACK == 0 {
+		if frame.Flags&ACK == 0 {
 			return fmt.Errorf("invalid, ack flag expected: %v", frame.Flags)
 		}
 	}
@@ -77,7 +75,7 @@ func VerifyConnectionPreface(reader *bufio.Reader) error {
 		return fmt.Errorf("invalid connection preface: %v", preface.String())
 	}
 
-	f, err := frame.ParseFrame(reader)
+	f, err := ParseFrame(reader)
 	if err != nil {
 		return fmt.Errorf("cannot parse frames: %v", err)
 	}
