@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"github.com/go-chi/chi/v5"
 	"github.com/tatsuhiro-t/go-http2-hpack"
-	"httpServer/internal/http2/frame"
 	"httpServer/internal/http2/structs"
 	"httpServer/internal/response/http2"
 	"io"
@@ -179,6 +178,8 @@ func HandleMultiplexedFrameParsing(comm *structs.Communication, router chi.Route
 
 	dec := comm.Dec
 
+	defer close(comm.Done)
+
 Loop:
 	for frame := range comm.Frames {
 		if streamID == 0 {
@@ -196,8 +197,6 @@ Loop:
 			if !moreFrames {
 				break Loop
 			}
-			break
-
 		case structs.DATA_FRAME_TYPE:
 			moreFrames, err := parseDataFrame(frame, &bodyContent)
 			if err != nil {
@@ -207,16 +206,18 @@ Loop:
 			if !moreFrames {
 				break Loop
 			}
-			break
 		default:
 			continue
 		}
 	}
-	close(comm.Frames)
 
 	r.Body = io.NopCloser(strings.NewReader(bodyContent))
+	r.RemoteAddr = conn.RemoteAddr().String()
+	r.TLS = &tls.ConnectionState{} // signal HTTPS to downstream handlers
+	if r.URL == nil {
+		r.URL = &url.URL{}
+	}
 	responseWriter := http2.NewResponse(conn, streamID, respEssential)
 	router.ServeHTTP(responseWriter, r)
-
-	respEssential.FrameChan <- frame.NewFrame(structs.DATA_FRAME_TYPE, structs.END_STREAM, streamID, nil)
+	responseWriter.EndStream()
 }

@@ -19,8 +19,32 @@ type Response struct {
 	essential          structs.ResponseEssential
 	lastStreamID       uint32
 	headerWritten      bool
+	endStreamSent      bool
 	preventFutureReads bool
 	maxTableSze        int
+}
+
+// hop-by-hop headers must not be forwarded over HTTP/2 (RFC 7540 §8.1.2.2).
+// `Connection` in particular is a connection-specific header and is illegal
+// in an HTTP/2 HEADERS block.
+var http2HopHeaders = map[string]struct{}{
+	"connection":          {},
+	"keep-alive":          {},
+	"proxy-connection":    {},
+	"transfer-encoding":   {},
+	"upgrade":             {},
+	"proxy-authenticate":  {},
+	"proxy-authorization": {},
+	"te":                  {},
+	"trailer":             {},
+}
+
+func (r *Response) EndStream() {
+	if r.endStreamSent {
+		return
+	}
+	r.essential.FrameChan <- frame.NewFrame(structs.DATA_FRAME_TYPE, structs.END_STREAM, r.lastStreamID, nil)
+	r.endStreamSent = true
 }
 
 const CONTENT_SIZE_MIN = 1_024 * 5
@@ -76,7 +100,7 @@ func (r *Response) Write(data []byte) (int, error) {
 	if !r.headerWritten {
 		length := min(len(data), 512)
 
-		if r.Header().Get("Content-Type") == "" {
+		if r.Header().Get("Content-Type") == "" && length > 0 {
 			r.Header().Set("Content-Type", http.DetectContentType(data[:length]))
 		}
 		if len(data) < CONTENT_SIZE_MIN {
@@ -88,36 +112,43 @@ func (r *Response) Write(data []byte) (int, error) {
 
 	r.preventFutureReads = true
 
+	if len(data) == 0 {
+		return 0, nil
+	}
+
 	r.body = append(r.body, data...)
 
-	var wrote int
-	var toWrite = len(r.body)
-
-	for toWrite != 0 {
-		if toWrite > MAX_DATA_BODY_LENGTH {
-			r.essential.FrameChan <- frame.NewFrame(structs.DATA_FRAME_TYPE, 0x00, r.lastStreamID, data[wrote:wrote+MAX_DATA_BODY_LENGTH])
-			toWrite -= MAX_DATA_BODY_LENGTH
-			wrote += MAX_DATA_BODY_LENGTH
-		} else {
-			r.essential.FrameChan <- frame.NewFrame(structs.DATA_FRAME_TYPE, structs.END_STREAM, r.lastStreamID, data[wrote:toWrite])
-			wrote += toWrite
-			toWrite -= toWrite
+	wrote := 0
+	for wrote < len(data) {
+		end := wrote + MAX_DATA_BODY_LENGTH
+		if end > len(data) {
+			end = len(data)
 		}
+		r.essential.FrameChan <- frame.NewFrame(structs.DATA_FRAME_TYPE, 0x00, r.lastStreamID, data[wrote:end])
+		wrote = end
 	}
 
 	return wrote, nil
 }
 
 func (r *Response) WriteHeader(statusCode int) {
-	var headers []*hpack.Header
-
-	for key, values := range r.header {
-		for _, value := range values {
-			headers = append(headers, &hpack.Header{Name: strings.ToLower(key), Value: value})
-		}
+	if r.headerWritten {
+		return
 	}
 
-	headers = append(headers, &hpack.Header{Name: ":status", Value: strconv.Itoa(statusCode)})
+	headers := []*hpack.Header{
+		{Name: ":status", Value: strconv.Itoa(statusCode)},
+	}
+
+	for key, values := range r.header {
+		lower := strings.ToLower(key)
+		if _, hop := http2HopHeaders[lower]; hop {
+			continue
+		}
+		for _, value := range values {
+			headers = append(headers, &hpack.Header{Name: lower, Value: value})
+		}
+	}
 
 	var encodedHeaders bytes.Buffer
 	r.essential.Enc.Encode(&encodedHeaders, headers)

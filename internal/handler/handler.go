@@ -11,7 +11,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"runtime"
 	"strings"
@@ -56,14 +55,45 @@ func MethodNotAllowedHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func resolveRoute(route []proxystructs.ProxyRoute, path string) *proxystructs.ProxyRoute {
-	for _, route := range route {
-		if route.Path == path {
-			return &route
+func resolveRoute(routes []proxystructs.ProxyRoute, path string) *proxystructs.ProxyRoute {
+	var best *proxystructs.ProxyRoute
+	bestLen := -1
+	for i := range routes {
+		prefix := strings.TrimRight(routes[i].Path, "/")
+		if path == prefix || path == prefix+"/" || strings.HasPrefix(path, prefix+"/") {
+			if len(prefix) > bestLen {
+				best = &routes[i]
+				bestLen = len(prefix)
+			}
 		}
 	}
+	return best
+}
 
-	return nil
+// hopHeaders are stripped per RFC 7230 sec 6.1 before forwarding.
+var hopHeaders = []string{
+	"Connection",
+	"Proxy-Connection",
+	"Keep-Alive",
+	"Proxy-Authenticate",
+	"Proxy-Authorization",
+	"Te",
+	"Trailer",
+	"Transfer-Encoding",
+	"Upgrade",
+}
+
+func stripHopHeaders(h http.Header) {
+	for _, c := range h.Values("Connection") {
+		for _, name := range strings.Split(c, ",") {
+			if name = strings.TrimSpace(name); name != "" {
+				h.Del(name)
+			}
+		}
+	}
+	for _, name := range hopHeaders {
+		h.Del(name)
+	}
 }
 
 // TODO: Finish
@@ -117,7 +147,16 @@ func ReverseProxyHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	targetURL := forwardRoute.Host.ResolveReference(&url.URL{Path: forwardRoute.TargetPath})
+	matchedPrefix := strings.TrimRight(forwardRoute.Path, "/")
+	tail := strings.TrimPrefix(r.URL.Path, matchedPrefix)
+	targetPath := strings.TrimRight(forwardRoute.TargetPath, "/") + tail
+	if targetPath == "" {
+		targetPath = "/"
+	}
+
+	targetURL := *forwardRoute.Host
+	targetURL.Path = targetPath
+	targetURL.RawQuery = r.URL.RawQuery
 
 	req, err := http.NewRequest(r.Method, targetURL.String(), r.Body)
 	if err != nil {
@@ -126,16 +165,28 @@ func ReverseProxyHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Header = r.Header.Clone()
+	stripHopHeaders(req.Header)
 
 	ip, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		Proxy.Log(logging.LogLevelError, "Failed to parse remote address: %s %v", r.RemoteAddr, err)
-		return
+		Proxy.Log(logging.LogLevelWarn, "Failed to parse remote address %q: %v", r.RemoteAddr, err)
+		ip = r.RemoteAddr
 	}
 	if prior := req.Header.Get("X-Forwarded-For"); prior != "" {
 		ip = prior + ", " + ip
 	}
 	req.Header.Set("X-Forwarded-For", ip)
+
+	if req.Header.Get("X-Forwarded-Host") == "" && r.Host != "" {
+		req.Header.Set("X-Forwarded-Host", r.Host)
+	}
+	if req.Header.Get("X-Forwarded-Proto") == "" {
+		proto := "http"
+		if r.TLS != nil {
+			proto = "https"
+		}
+		req.Header.Set("X-Forwarded-Proto", proto)
+	}
 
 	for key, values := range Proxy.GetAddedHeaders() {
 		for _, value := range values {
@@ -170,6 +221,7 @@ func ReverseProxyHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
+	stripHopHeaders(resp.Header)
 	for name, values := range resp.Header {
 		for _, value := range values {
 			w.Header().Add(name, value)
@@ -242,15 +294,21 @@ func HandleStreamMultiplexing(reader *bufio.Reader, essential *structs.ParsingEs
 			go http2.HandleMultiplexedFrameParsing(essential.Channels[f.StreamID], essential.Router, essential.Conn, respEssential)
 		}
 
+		comm := essential.Channels[f.StreamID]
+
 		select {
-		case <-essential.Channels[f.StreamID].Frames: // Channel is closed
-			Proxy.Log(logging.LogLevelDebug, "Channel closed for StreamID: %d", f.StreamID)
+		case <-comm.Done:
+			Proxy.Log(logging.LogLevelDebug, "Stream %d already finished, dropping frame", f.StreamID)
 			continue
 		default:
 		}
 
 		Proxy.Log(logging.LogLevelDebug, "Handling frame for StreamID: %d", f.StreamID)
-		essential.Channels[f.StreamID].Frames <- *f
+		select {
+		case comm.Frames <- *f:
+		case <-comm.Done:
+			Proxy.Log(logging.LogLevelDebug, "Stream %d finished while sending frame, dropping", f.StreamID)
+		}
 	}
 }
 
@@ -308,15 +366,16 @@ func HandleHTTP11(conn net.Conn, r chi.Router) {
 			}
 		}
 
-		req.RemoteAddr = conn.RemoteAddr().String()
 		responseWriter := http11Response.NewResponse(conn)
 		if sendBadRequest {
 			responseWriter.WriteHeader(http.StatusBadRequest)
 			proxy.Log(logging.LogLevelWarn, "[BAD REQUEST] Chunked encoding issue for %v", conn.RemoteAddr())
-		} else {
-			proxy.Log(logging.LogLevelDebug, "Serving HTTP/1.1 request from %v", conn.RemoteAddr())
-			r.ServeHTTP(responseWriter, req)
+			return
 		}
+
+		req.RemoteAddr = conn.RemoteAddr().String()
+		proxy.Log(logging.LogLevelDebug, "Serving HTTP/1.1 request from %v", conn.RemoteAddr())
+		r.ServeHTTP(responseWriter, req)
 
 		if !moreRequests {
 			break

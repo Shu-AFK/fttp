@@ -184,7 +184,9 @@ func (proxy *Proxy) Start(cert []tls.Certificate) error {
 	r.MethodNotAllowed(handler.MethodNotAllowedHandler)
 
 	for _, route := range proxy.Routes {
-		r.HandleFunc(route.Path, handler.ReverseProxyHandler)
+		pattern := strings.TrimRight(route.Path, "/")
+		r.HandleFunc(pattern, handler.ReverseProxyHandler)
+		r.HandleFunc(pattern+"/*", handler.ReverseProxyHandler)
 		proxy.Log(logging.LogLevelDebug, "Added route: %s", route.Path)
 	}
 

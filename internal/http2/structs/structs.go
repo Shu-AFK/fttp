@@ -54,6 +54,7 @@ type Frame struct {
 
 type Communication struct {
 	Frames chan Frame
+	Done   chan struct{}
 
 	Mutex *sync.Mutex
 	Dec   *hpack.Decoder
@@ -61,7 +62,8 @@ type Communication struct {
 
 func NewCommunication(dec *hpack.Decoder, mut *sync.Mutex) *Communication {
 	return &Communication{
-		Frames: make(chan Frame),
+		Frames: make(chan Frame, 8),
+		Done:   make(chan struct{}),
 		Mutex:  mut,
 		Dec:    dec,
 	}
