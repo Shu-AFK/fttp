@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -36,7 +37,18 @@ type echoResponse struct {
 // startBackend starts a local HTTP/1.1 echo server that returns request shape as JSON.
 func startBackend(t *testing.T) *httptest.Server {
 	t.Helper()
+	srv, _ := startCountingBackend(t)
+	return srv
+}
+
+// startCountingBackend is like startBackend but exposes a hit counter so tests
+// can assert how many times the backend was actually invoked (useful for cache
+// verification).
+func startCountingBackend(t *testing.T) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
 		body, _ := io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(echoResponse{
@@ -48,7 +60,7 @@ func startBackend(t *testing.T) *httptest.Server {
 		})
 	}))
 	t.Cleanup(srv.Close)
-	return srv
+	return srv, &hits
 }
 
 // writeSelfSignedCert writes a fresh in-memory self-signed cert/key pair to dir,
@@ -118,7 +130,8 @@ func freePort(t *testing.T) int {
 }
 
 // startProxy boots a Proxy in a goroutine routed at backend, returning its port.
-func startProxy(t *testing.T, backend string) int {
+// cacheTTL > 0 enables the cache with that TTL (in seconds).
+func startProxy(t *testing.T, backend string, cacheTTL int) int {
 	t.Helper()
 	dir := t.TempDir()
 	certPath, keyPath := writeSelfSignedCert(t, dir)
@@ -126,6 +139,11 @@ func startProxy(t *testing.T, backend string) int {
 	port := freePort(t)
 	configPath := filepath.Join(dir, "config.yaml")
 	logPath := filepath.Join(dir, "proxy.log")
+	cachingEnabled := cacheTTL > 0
+	configTTL := cacheTTL
+	if configTTL <= 0 {
+		configTTL = 3600
+	}
 	config := fmt.Sprintf(`server:
   port: %d
   routes:
@@ -138,13 +156,13 @@ func startProxy(t *testing.T, backend string) int {
 add_header:
   X-Test: ["test-value"]
 caching:
-  enabled: false
-  ttl: 3600
+  enabled: %t
+  ttl: %d
 blacklist: []
 logger:
   level: "warn"
   file: %q
-`, port, backend, backend, logPath)
+`, port, backend, backend, cachingEnabled, configTTL, logPath)
 	if err := os.WriteFile(configPath, []byte(config), 0644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -218,7 +236,7 @@ func TestReverseProxy(t *testing.T) {
 	}
 
 	backend := startBackend(t)
-	port := startProxy(t, backend.URL)
+	port := startProxy(t, backend.URL, 0)
 	base := fmt.Sprintf("https://127.0.0.1:%d", port)
 
 	clients := map[string]*http.Client{
@@ -313,4 +331,60 @@ func TestReverseProxy(t *testing.T) {
 			})
 		})
 	}
+}
+
+func TestCaching(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test skipped under -short")
+	}
+
+	backend, hits := startCountingBackend(t)
+	port := startProxy(t, backend.URL, 60)
+	base := fmt.Sprintf("https://127.0.0.1:%d", port)
+	client := http11Client()
+
+	t.Run("repeated_get_hits_backend_once", func(t *testing.T) {
+		hits.Store(0)
+		for i := 0; i < 3; i++ {
+			req, _ := http.NewRequest("GET", base+"/api/v1/cached", nil)
+			code, echo := do(t, client, req)
+			if code != 200 {
+				t.Fatalf("status=%d", code)
+			}
+			if echo.Path != "/api/v1/cached" {
+				t.Errorf("path=%q", echo.Path)
+			}
+		}
+		if got := hits.Load(); got != 1 {
+			t.Errorf("backend hits=%d, want 1 (cache should serve repeats)", got)
+		}
+	})
+
+	t.Run("post_is_not_cached", func(t *testing.T) {
+		hits.Store(0)
+		for i := 0; i < 3; i++ {
+			req, _ := http.NewRequest("POST", base+"/api/v1/post-cached", strings.NewReader(""))
+			code, _ := do(t, client, req)
+			if code != 200 {
+				t.Fatalf("status=%d", code)
+			}
+		}
+		if got := hits.Load(); got != 3 {
+			t.Errorf("backend hits=%d, want 3 (POST must not be cached)", got)
+		}
+	})
+
+	t.Run("different_paths_are_separate_keys", func(t *testing.T) {
+		hits.Store(0)
+		for _, path := range []string{"/api/v1/a", "/api/v1/b", "/api/v1/a", "/api/v1/b"} {
+			req, _ := http.NewRequest("GET", base+path, nil)
+			code, _ := do(t, client, req)
+			if code != 200 {
+				t.Fatalf("status=%d for %s", code, path)
+			}
+		}
+		if got := hits.Load(); got != 2 {
+			t.Errorf("backend hits=%d, want 2 (one miss per distinct path)", got)
+		}
+	})
 }

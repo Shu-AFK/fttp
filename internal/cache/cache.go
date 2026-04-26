@@ -1,100 +1,139 @@
 package cache
 
-// TODO: Add function to turn Request and Response back into http. version
-
 import (
-	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"httpServer/internal/logging"
 )
 
-// Host is the narrow interface the cache needs from its caller. Defined here
-// (rather than in the proxy package) so cache stays import-cycle free.
+// Host is the narrow interface the cache needs from its caller. Defined
+// here (rather than in the proxy package) so cache stays import-cycle free.
 type Host interface {
 	Log(level logging.LogLevel, format string, args ...interface{})
 	GetCachingTTL() time.Duration
 }
 
-var cache *CacheStruct
-var ttl time.Duration
-var host Host
-
-func InitCache(h Host, channels Channels) {
-	cache = new(CacheStruct)
-	cache.Cache = make(map[Request]Response)
-	cache.Mutex = sync.RWMutex{}
-
-	ttl = h.GetCachingTTL()
-	host = h
-
-	host.Log(logging.LogLevelDebug, "Starting Cache")
-	go startCaching(channels.Requests, channels.Responses, channels.Found)
-	go cleanupCache()
-	go addToCache(channels.AddToCache)
+type Cache struct {
+	host    Host
+	ttl     time.Duration
+	mu      sync.RWMutex
+	entries map[string]entry
+	stop    chan struct{}
 }
 
-// TODO: Need a more sophisticated approach
-func cleanupCache() {
+// New starts a Cache and a background sweeper that purges expired entries.
+func New(host Host) *Cache {
+	ttl := host.GetCachingTTL()
+	if ttl <= 0 {
+		ttl = time.Hour
+	}
+	c := &Cache{
+		host:    host,
+		ttl:     ttl,
+		entries: make(map[string]entry),
+		stop:    make(chan struct{}),
+	}
+	host.Log(logging.LogLevelDebug, "Starting Cache (ttl=%s)", c.ttl)
+	go c.sweep()
+	return c
+}
+
+func (c *Cache) Stop() {
+	select {
+	case <-c.stop:
+	default:
+		close(c.stop)
+	}
+}
+
+func key(method, url string) string {
+	return method + " " + url
+}
+
+// Get returns a cached response for the request, or ok=false on miss/expiry.
+// Caller decides whether to call Get based on method, etc.
+func (c *Cache) Get(method, url string) (statusCode int, header http.Header, body []byte, ok bool) {
+	c.mu.RLock()
+	e, found := c.entries[key(method, url)]
+	c.mu.RUnlock()
+	if !found {
+		c.host.Log(logging.LogLevelDebug, "Cache miss: %s %s", method, url)
+		return 0, nil, nil, false
+	}
+	if time.Now().After(e.expires) {
+		c.host.Log(logging.LogLevelDebug, "Cache expired: %s %s", method, url)
+		return 0, nil, nil, false
+	}
+	c.host.Log(logging.LogLevelDebug, "Cache hit: %s %s", method, url)
+	return e.statusCode, e.header.Clone(), append([]byte(nil), e.body...), true
+}
+
+// Put stores a response for later retrieval. Caller is responsible for
+// deciding whether the response is cacheable (see Cacheable).
+func (c *Cache) Put(method, url string, statusCode int, header http.Header, body []byte) {
+	c.mu.Lock()
+	c.entries[key(method, url)] = entry{
+		statusCode: statusCode,
+		header:     header.Clone(),
+		body:       append([]byte(nil), body...),
+		expires:    time.Now().Add(c.ttl),
+	}
+	c.mu.Unlock()
+	c.host.Log(logging.LogLevelDebug, "Cached: %s %s (%d bytes)", method, url, len(body))
+}
+
+func (c *Cache) sweep() {
+	ticker := time.NewTicker(c.ttl / 2)
+	defer ticker.Stop()
 	for {
-		time.Sleep(ttl / 2)
-		cache.Mutex.RLock()
-		for req := range cache.Cache {
-			if time.Since(req.TimeCached) > ttl {
-				delete(cache.Cache, req)
+		select {
+		case <-c.stop:
+			return
+		case <-ticker.C:
+			now := time.Now()
+			c.mu.Lock()
+			for k, e := range c.entries {
+				if now.After(e.expires) {
+					delete(c.entries, k)
+				}
+			}
+			c.mu.Unlock()
+		}
+	}
+}
+
+// Cacheable reports whether a request/response pair is safe to cache.
+// Conservative: only GET responses with status 200, no Cache-Control:
+// no-store on either side, and no Set-Cookie on the response.
+func Cacheable(method string, reqHeader http.Header, statusCode int, respHeader http.Header) bool {
+	if method != http.MethodGet {
+		return false
+	}
+	if statusCode != http.StatusOK {
+		return false
+	}
+	if hasNoStore(reqHeader.Values("Cache-Control")) {
+		return false
+	}
+	if hasNoStore(respHeader.Values("Cache-Control")) {
+		return false
+	}
+	if respHeader.Get("Set-Cookie") != "" {
+		return false
+	}
+	return true
+}
+
+func hasNoStore(values []string) bool {
+	for _, v := range values {
+		for _, tok := range strings.Split(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(tok), "no-store") {
+				return true
 			}
 		}
-		cache.Mutex.RUnlock()
 	}
-}
-
-func addToCache(in chan AddToCacheStruct) {
-	for add := range in {
-		outRequest := turnReqToCacheRequest(add.Request)
-		outResponse := turnRespToCacheResponse(add.Response)
-		cache.Mutex.RLock()
-		cache.Cache[outRequest] = outResponse
-		cache.Mutex.RUnlock()
-	}
-}
-
-func startCaching(requests chan Request, responses chan Response, found chan bool) {
-	for request := range requests {
-		cache.Mutex.RLock()
-		val, ok := cache.Cache[request]
-		cache.Mutex.RUnlock()
-		if ok {
-			host.Log(logging.LogLevelDebug, fmt.Sprintf("Cache hit for request: %s", request.URL.String()))
-			found <- true
-			responses <- val
-		} else {
-			host.Log(logging.LogLevelDebug, fmt.Sprintf("Cache miss for request: %s", request.URL.String()))
-			found <- false
-		}
-	}
-}
-
-func turnReqToCacheRequest(request http.Request) Request {
-	return Request{
-		Method:     request.Method,
-		URL:        request.URL,
-		RequestURI: request.RequestURI,
-		TimeCached: time.Now(),
-	}
-}
-
-func turnRespToCacheResponse(response http.Response) Response {
-	headerCopy := make(http.Header)
-	for k, v := range response.Header {
-		headerCopy[k] = v
-	}
-
-	return Response{
-		StatusCode:    response.StatusCode,
-		Body:          response.Body,
-		ContentLength: response.ContentLength,
-		Header:        headerCopy,
-	}
+	return false
 }

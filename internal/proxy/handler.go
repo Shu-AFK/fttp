@@ -111,7 +111,6 @@ func (p *Proxy) loadSystemCAs() *x509.CertPool {
 	return certPool
 }
 
-// ReverseProxyHandler TODO: Add caching
 func (p *Proxy) ReverseProxyHandler(w http.ResponseWriter, r *http.Request) {
 	forwardRoute := resolveRoute(p.Routes, r.URL.Path)
 	if forwardRoute == nil {

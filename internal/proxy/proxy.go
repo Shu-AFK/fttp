@@ -17,14 +17,13 @@ import (
 )
 
 type Proxy struct {
-	Port            uint16
-	Routes          []ProxyRoute
-	AddedHeaders    http.Header
-	CachingActive   bool
-	CachingTTL      time.Duration
-	CachingChannels cache.Channels
-	Blacklist       []net.IP
-	Logger          logging.Logger
+	Port          uint16
+	Routes        []ProxyRoute
+	AddedHeaders  http.Header
+	CachingActive bool
+	CachingTTL    time.Duration
+	Blacklist     []net.IP
+	Logger        logging.Logger
 }
 
 func New(configPath string) *Proxy {
@@ -145,25 +144,21 @@ func (p *Proxy) Start(cert []tls.Certificate) error {
 
 	p.Log(logging.LogLevelDebug, "Setting up router with provided routes")
 
+	var c *cache.Cache
+	if p.CachingActive {
+		c = cache.New(p)
+	}
+
 	r := chi.NewRouter()
 	r.NotFound(p.NotFoundHandler)
 	r.MethodNotAllowed(p.MethodNotAllowedHandler)
 
+	handler := cache.Middleware(c, p.ReverseProxyHandler)
 	for _, route := range p.Routes {
 		pattern := strings.TrimRight(route.Path, "/")
-		r.HandleFunc(pattern, p.ReverseProxyHandler)
-		r.HandleFunc(pattern+"/*", p.ReverseProxyHandler)
+		r.HandleFunc(pattern, handler)
+		r.HandleFunc(pattern+"/*", handler)
 		p.Log(logging.LogLevelDebug, "Added route: %s", route.Path)
-	}
-
-	if p.CachingActive {
-		p.CachingChannels = cache.Channels{
-			Requests:   make(chan cache.Request),
-			Responses:  make(chan cache.Response),
-			Found:      make(chan bool),
-			AddToCache: make(chan cache.AddToCacheStruct),
-		}
-		cache.InitCache(p, p.CachingChannels)
 	}
 
 	p.Log(logging.LogLevelInfo, "Listening on https://%s", ln.Addr().String())
