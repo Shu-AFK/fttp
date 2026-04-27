@@ -3,8 +3,9 @@ package logging
 import (
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"os"
+	"strings"
 )
 
 type LogLevel string
@@ -21,10 +22,12 @@ type Logger interface {
 }
 
 type DefaultLogger struct {
-	logMode LogLevel
-	logger  *log.Logger
+	inner *slog.Logger
 }
 
+// NewDefaultLogger writes to stdout and the given log file using slog's
+// text handler. mode is the minimum level emitted; entries below it are
+// dropped by slog itself.
 func NewDefaultLogger(mode LogLevel, logFile string) (*DefaultLogger, error) {
 	file, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0666)
 	if err != nil {
@@ -32,26 +35,40 @@ func NewDefaultLogger(mode LogLevel, logFile string) (*DefaultLogger, error) {
 	}
 
 	multiWriter := io.MultiWriter(os.Stdout, file)
-	logger := log.New(multiWriter, "", log.LstdFlags)
-
-	return &DefaultLogger{
-		logMode: mode,
-		logger:  logger,
-	}, nil
+	handler := slog.NewTextHandler(multiWriter, &slog.HandlerOptions{
+		Level: parseLevel(mode),
+	})
+	return &DefaultLogger{inner: slog.New(handler)}, nil
 }
 
-func (l *DefaultLogger) Log(level LogLevel, format string, args ...interface{}) {
-	logLevels := map[LogLevel]int{
-		LogLevelDebug: 1,
-		LogLevelInfo:  2,
-		LogLevelWarn:  3,
-		LogLevelError: 4,
+func parseLevel(l LogLevel) slog.Level {
+	switch LogLevel(strings.ToUpper(string(l))) {
+	case LogLevelDebug:
+		return slog.LevelDebug
+	case LogLevelWarn:
+		return slog.LevelWarn
+	case LogLevelError:
+		return slog.LevelError
+	case LogLevelInfo:
+		return slog.LevelInfo
+	default:
+		return slog.LevelInfo
 	}
+}
 
-	currentLevel := logLevels[l.logMode]
-	messageLevel := logLevels[level]
-
-	if messageLevel >= currentLevel {
-		l.logger.Printf("[%s] %s", level, fmt.Sprintf(format, args...))
+// Log formats the message with fmt.Sprintf, then forwards to slog at the
+// matching level. Existing call sites use printf-style format strings; we
+// keep that working by formatting eagerly.
+func (l *DefaultLogger) Log(level LogLevel, format string, args ...interface{}) {
+	msg := fmt.Sprintf(format, args...)
+	switch parseLevel(level) {
+	case slog.LevelDebug:
+		l.inner.Debug(msg)
+	case slog.LevelWarn:
+		l.inner.Warn(msg)
+	case slog.LevelError:
+		l.inner.Error(msg)
+	default:
+		l.inner.Info(msg)
 	}
 }

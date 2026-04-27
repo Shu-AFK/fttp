@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -46,10 +47,27 @@ func startBackend(t *testing.T) *httptest.Server {
 // verification).
 func startCountingBackend(t *testing.T) (*httptest.Server, *atomic.Int32) {
 	t.Helper()
+	srv, hits, _ := startConfigurableBackend(t)
+	return srv, hits
+}
+
+// startConfigurableBackend returns a server, a hit counter, and a per-request
+// header map that the backend will copy into its response. Lets cache tests
+// inject Cache-Control directives.
+func startConfigurableBackend(t *testing.T) (*httptest.Server, *atomic.Int32, *sync.Map) {
+	t.Helper()
 	var hits atomic.Int32
+	var respHeaders sync.Map // path -> http.Header
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
 		body, _ := io.ReadAll(r.Body)
+		if v, ok := respHeaders.Load(r.URL.Path); ok {
+			for k, vs := range v.(http.Header) {
+				for _, val := range vs {
+					w.Header().Add(k, val)
+				}
+			}
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(echoResponse{
 			Method:  r.Method,
@@ -60,7 +78,7 @@ func startCountingBackend(t *testing.T) (*httptest.Server, *atomic.Int32) {
 		})
 	}))
 	t.Cleanup(srv.Close)
-	return srv, &hits
+	return srv, &hits, &respHeaders
 }
 
 // writeSelfSignedCert writes a fresh in-memory self-signed cert/key pair to dir,
@@ -395,6 +413,84 @@ func TestCaching(t *testing.T) {
 		}
 		if got := hits.Load(); got != 2 {
 			t.Errorf("backend hits=%d, want 2 (one miss per distinct path)", got)
+		}
+	})
+}
+
+func TestCacheControl(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test skipped under -short")
+	}
+
+	backend, hits, headers := startConfigurableBackend(t)
+	p, port := startProxyHandle(t, backend.URL, 60)
+	base := fmt.Sprintf("https://127.0.0.1:%d", port)
+	client := http11Client()
+
+	t.Run("max_age_zero_not_cached", func(t *testing.T) {
+		hits.Store(0)
+		headers.Store("/api/v1/no-cache-zero", http.Header{"Cache-Control": []string{"max-age=0"}})
+		for i := 0; i < 3; i++ {
+			req, _ := http.NewRequest("GET", base+"/api/v1/no-cache-zero", nil)
+			if code, _ := do(t, client, req); code != 200 {
+				t.Fatalf("status=%d", code)
+			}
+		}
+		if got := hits.Load(); got != 3 {
+			t.Errorf("backend hits=%d, want 3 (max-age=0 must not be cached)", got)
+		}
+	})
+
+	t.Run("no_cache_directive_not_cached", func(t *testing.T) {
+		hits.Store(0)
+		headers.Store("/api/v1/private", http.Header{"Cache-Control": []string{"no-cache"}})
+		for i := 0; i < 3; i++ {
+			req, _ := http.NewRequest("GET", base+"/api/v1/private", nil)
+			if code, _ := do(t, client, req); code != 200 {
+				t.Fatalf("status=%d", code)
+			}
+		}
+		if got := hits.Load(); got != 3 {
+			t.Errorf("backend hits=%d, want 3 (no-cache must not be cached)", got)
+		}
+	})
+
+	t.Run("max_age_short_ttl_expires", func(t *testing.T) {
+		hits.Store(0)
+		headers.Store("/api/v1/short", http.Header{"Cache-Control": []string{"max-age=1"}})
+		req, _ := http.NewRequest("GET", base+"/api/v1/short", nil)
+		if code, _ := do(t, client, req); code != 200 {
+			t.Fatalf("status=%d", code)
+		}
+		if code, _ := do(t, client, req); code != 200 {
+			t.Fatalf("status=%d", code)
+		}
+		if got := hits.Load(); got != 1 {
+			t.Errorf("backend hits=%d, want 1 (within max-age window)", got)
+		}
+		// Wait past the per-entry TTL set by Cache-Control: max-age=1.
+		time.Sleep(1100 * time.Millisecond)
+		if code, _ := do(t, client, req); code != 200 {
+			t.Fatalf("status=%d", code)
+		}
+		if got := hits.Load(); got != 2 {
+			t.Errorf("backend hits=%d, want 2 (max-age expired)", got)
+		}
+	})
+
+	t.Run("hit_miss_counters", func(t *testing.T) {
+		// Reset baseline.
+		hBefore, mBefore := p.CacheStats()
+		req, _ := http.NewRequest("GET", base+"/api/v1/counter-test", nil)
+		_, _ = do(t, client, req) // first call: miss
+		_, _ = do(t, client, req) // second call: hit
+		_, _ = do(t, client, req) // third call: hit
+		hAfter, mAfter := p.CacheStats()
+		if h := hAfter - hBefore; h != 2 {
+			t.Errorf("hits delta=%d, want 2", h)
+		}
+		if m := mAfter - mBefore; m != 1 {
+			t.Errorf("misses delta=%d, want 1", m)
 		}
 	})
 }

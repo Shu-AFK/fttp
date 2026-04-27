@@ -10,7 +10,9 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"time"
 
+	"httpServer/internal/cache"
 	"httpServer/internal/logging"
 )
 
@@ -112,9 +114,23 @@ func (p *Proxy) loadSystemCAs() *x509.CertPool {
 }
 
 func (p *Proxy) ReverseProxyHandler(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	status := http.StatusOK
+	upstream := ""
+	defer func() {
+		cacheState := cache.CacheStatus(r)
+		if cacheState == "" {
+			cacheState = "off"
+		}
+		p.Log(logging.LogLevelInfo,
+			"request method=%s path=%q status=%d cache=%s dur=%s upstream=%q",
+			r.Method, r.URL.Path, status, cacheState, time.Since(start), upstream)
+	}()
+
 	forwardRoute := resolveRoute(p.Routes, r.URL.Path)
 	if forwardRoute == nil {
 		p.Log(logging.LogLevelWarn, "Forwarding to nil target: %s %s", r.Method, r.URL.Path)
+		status = http.StatusBadGateway
 		w.WriteHeader(http.StatusBadGateway)
 		return
 	}
@@ -129,10 +145,12 @@ func (p *Proxy) ReverseProxyHandler(w http.ResponseWriter, r *http.Request) {
 	targetURL := *forwardRoute.Host
 	targetURL.Path = targetPath
 	targetURL.RawQuery = r.URL.RawQuery
+	upstream = targetURL.String()
 
-	req, err := http.NewRequest(r.Method, targetURL.String(), r.Body)
+	req, err := http.NewRequest(r.Method, upstream, r.Body)
 	if err != nil {
 		p.Log(logging.LogLevelError, "New request creation failed in ReverseProxyHandler: %v", err)
+		status = http.StatusInternalServerError
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -177,10 +195,12 @@ func (p *Proxy) ReverseProxyHandler(w http.ResponseWriter, r *http.Request) {
 	resp, err := client.Do(req)
 	if err != nil {
 		p.Log(logging.LogLevelError, "Request forwarding failed in ReverseProxyHandler: %v", err)
+		status = http.StatusBadGateway
 		w.WriteHeader(http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
+	status = resp.StatusCode
 
 	stripHopHeaders(resp.Header)
 	for name, values := range resp.Header {

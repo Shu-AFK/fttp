@@ -99,6 +99,15 @@ func New(configPath string) *Proxy {
 	}
 }
 
+// CacheStats returns the current cache hit/miss counters. Returns zeros if
+// caching is disabled.
+func (p *Proxy) CacheStats() (hits, misses int64) {
+	if p.cache == nil {
+		return 0, 0
+	}
+	return p.cache.Hits(), p.cache.Misses()
+}
+
 // Stop signals Start to exit, closes the listener, waits for in-flight
 // connections to finish, and stops the cache sweeper. Safe to call multiple
 // times; safe to call before Start has fully booted.
