@@ -3,6 +3,9 @@ package main
 import (
 	"flag"
 	"fmt"
+	"os"
+	"os/signal"
+	"syscall"
 
 	"httpServer/internal/proxy"
 )
@@ -24,8 +27,17 @@ func main() {
 	}
 
 	p := proxy.New(*configFile)
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		sig := <-sigCh
+		fmt.Fprintf(os.Stderr, "\nReceived %s, shutting down...\n", sig)
+		p.Stop()
+	}()
+
 	if err := p.Start(cert); err != nil {
 		fmt.Printf("failed to start proxy: %v", err)
-		return
+		os.Exit(1)
 	}
 }

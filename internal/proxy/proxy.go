@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -24,6 +25,12 @@ type Proxy struct {
 	CachingTTL    time.Duration
 	Blacklist     []net.IP
 	Logger        logging.Logger
+
+	listener net.Listener
+	cache    *cache.Cache
+	stop     chan struct{}
+	stopOnce sync.Once
+	wg       sync.WaitGroup
 }
 
 func New(configPath string) *Proxy {
@@ -88,7 +95,23 @@ func New(configPath string) *Proxy {
 		Blacklist:     blacklist,
 		Logger:        logger,
 		AddedHeaders:  conf.AddHeader,
+		stop:          make(chan struct{}),
 	}
+}
+
+// Stop signals Start to exit, closes the listener, waits for in-flight
+// connections to finish, and stops the cache sweeper. Safe to call multiple
+// times; safe to call before Start has fully booted.
+func (p *Proxy) Stop() {
+	p.stopOnce.Do(func() {
+		close(p.stop)
+		if p.listener != nil {
+			_ = p.listener.Close()
+		}
+		if p.cache != nil {
+			p.cache.Stop()
+		}
+	})
 }
 
 func (p *Proxy) Log(level logging.LogLevel, message string, args ...interface{}) {
@@ -135,25 +158,19 @@ func (p *Proxy) Start(cert []tls.Certificate) error {
 		Certificates: cert,
 	}
 	tlsListener := tls.NewListener(ln, tlsConfig)
-
-	defer func() {
-		if cerr := ln.Close(); cerr != nil {
-			p.Log(logging.LogLevelError, "Failed to close listener: %v", cerr)
-		}
-	}()
+	p.listener = tlsListener
 
 	p.Log(logging.LogLevelDebug, "Setting up router with provided routes")
 
-	var c *cache.Cache
 	if p.CachingActive {
-		c = cache.New(p)
+		p.cache = cache.New(p)
 	}
 
 	r := chi.NewRouter()
 	r.NotFound(p.NotFoundHandler)
 	r.MethodNotAllowed(p.MethodNotAllowedHandler)
 
-	handler := cache.Middleware(c, p.ReverseProxyHandler)
+	handler := cache.Middleware(p.cache, p.ReverseProxyHandler)
 	for _, route := range p.Routes {
 		pattern := strings.TrimRight(route.Path, "/")
 		r.HandleFunc(pattern, handler)
@@ -166,8 +183,16 @@ func (p *Proxy) Start(cert []tls.Certificate) error {
 	for {
 		conn, err := tlsListener.Accept()
 		if err != nil {
-			p.Log(logging.LogLevelError, "Failed to accept connection: %v", err)
-			continue
+			select {
+			case <-p.stop:
+				p.Log(logging.LogLevelInfo, "Shutdown requested, waiting for in-flight connections")
+				p.wg.Wait()
+				p.Log(logging.LogLevelInfo, "Proxy stopped cleanly")
+				return nil
+			default:
+				p.Log(logging.LogLevelError, "Failed to accept connection: %v", err)
+				continue
+			}
 		}
 
 		p.Log(logging.LogLevelInfo, "Accepted new connection from %v", conn.RemoteAddr())
@@ -177,7 +202,9 @@ func (p *Proxy) Start(cert []tls.Certificate) error {
 			continue
 		}
 
+		p.wg.Add(1)
 		go func(conn net.Conn) {
+			defer p.wg.Done()
 			p.Log(logging.LogLevelDebug, "Handling connection from %v", conn.RemoteAddr())
 			p.handleAccept(conn, r)
 		}(conn)

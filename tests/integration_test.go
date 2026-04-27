@@ -130,8 +130,17 @@ func freePort(t *testing.T) int {
 }
 
 // startProxy boots a Proxy in a goroutine routed at backend, returning its port.
+// The proxy is automatically Stop()'d on test cleanup.
 // cacheTTL > 0 enables the cache with that TTL (in seconds).
 func startProxy(t *testing.T, backend string, cacheTTL int) int {
+	t.Helper()
+	_, port := startProxyHandle(t, backend, cacheTTL)
+	return port
+}
+
+// startProxyHandle is like startProxy but returns the *proxy.Proxy too, plus a
+// channel that fires once Start has returned. Used by the shutdown test.
+func startProxyHandle(t *testing.T, backend string, cacheTTL int) (*proxy.Proxy, int) {
 	t.Helper()
 	dir := t.TempDir()
 	certPath, keyPath := writeSelfSignedCert(t, dir)
@@ -176,18 +185,19 @@ logger:
 	go func() {
 		_ = p.Start(certs)
 	}()
+	t.Cleanup(p.Stop)
 
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		c, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 200*time.Millisecond)
 		if err == nil {
 			_ = c.Close()
-			return port
+			return p, port
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatalf("proxy did not start listening on :%d", port)
-	return 0
+	return nil, 0
 }
 
 func http11Client() *http.Client {
@@ -387,4 +397,89 @@ func TestCaching(t *testing.T) {
 			t.Errorf("backend hits=%d, want 2 (one miss per distinct path)", got)
 		}
 	})
+}
+
+func TestGracefulShutdown(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test skipped under -short")
+	}
+
+	backend := startBackend(t)
+
+	// Boot proxy manually so we can observe Start's return value.
+	dir := t.TempDir()
+	certPath, keyPath := writeSelfSignedCert(t, dir)
+	port := freePort(t)
+	configPath := filepath.Join(dir, "config.yaml")
+	logPath := filepath.Join(dir, "proxy.log")
+	config := fmt.Sprintf(`server:
+  port: %d
+  routes:
+    - path: "/api/v1"
+      host: %q
+      target_path: "/api/v1"
+add_header: {}
+caching:
+  enabled: false
+  ttl: 3600
+blacklist: []
+logger:
+  level: "warn"
+  file: %q
+`, port, backend.URL, logPath)
+	if err := os.WriteFile(configPath, []byte(config), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	certs, err := proxy.LoadCertificates(certPath, keyPath)
+	if err != nil {
+		t.Fatalf("load certs: %v", err)
+	}
+
+	p := proxy.New(configPath)
+	startErr := make(chan error, 1)
+	go func() { startErr <- p.Start(certs) }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		c, derr := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 200*time.Millisecond)
+		if derr == nil {
+			_ = c.Close()
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// Confirm proxy is actually serving.
+	client := http11Client()
+	req, _ := http.NewRequest("GET", fmt.Sprintf("https://127.0.0.1:%d/api/v1", port), nil)
+	if code, _ := do(t, client, req); code != 200 {
+		t.Fatalf("pre-shutdown request status=%d", code)
+	}
+
+	// Idle close so the connection from the keep-alive pool doesn't hold
+	// the proxy open past Stop.
+	client.CloseIdleConnections()
+
+	stoppedAt := time.Now()
+	p.Stop()
+
+	select {
+	case err := <-startErr:
+		if err != nil {
+			t.Errorf("Start returned %v after Stop", err)
+		}
+		if elapsed := time.Since(stoppedAt); elapsed > 2*time.Second {
+			t.Errorf("Start took %s to return after Stop, want <2s", elapsed)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Start did not return within 5s after Stop")
+	}
+
+	// Stop must be safe to call again.
+	p.Stop()
+
+	// Port should now refuse connections.
+	if _, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 200*time.Millisecond); err == nil {
+		t.Errorf("port :%d still accepts connections after Stop", port)
+	}
 }

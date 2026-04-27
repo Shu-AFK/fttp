@@ -201,7 +201,6 @@ def test_browser_follows_subpath_with_query(stack, driver):
         EC.presence_of_element_located((By.ID, "path"))
     )
 
-    # Backend echoes the path it received from the proxy. Query string is on
-    # the URL but not rendered in the body, so we just verify the path tail
-    # was preserved end-to-end.
-    assert driver.find_element(By.ID, "path").text == "/api/v1/users"
+    # Backend echoes the request URI it received from the proxy (path + query),
+    # confirming both the subpath and the query string survived the rewrite.
+    assert driver.find_element(By.ID, "path").text == "/api/v1/users?id=42"
