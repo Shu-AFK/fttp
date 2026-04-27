@@ -74,6 +74,7 @@ func New(configPath string) *Proxy {
 			Path:       route.Path,
 			Host:       parsedURL,
 			TargetPath: route.TargetPath,
+			Client:     newRouteClient(route.InsecureSkipVerify),
 		})
 	}
 

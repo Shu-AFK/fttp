@@ -51,24 +51,42 @@ func Middleware(c *Cache, next http.HandlerFunc) http.HandlerFunc {
 		rec := newRecorder(w)
 		next(rec, r.WithContext(ctx))
 
+		if rec.overflowed {
+			c.host.Log(logging.LogLevelDebug,
+				"Skipping cache (body exceeds %d bytes): %s %s", rec.maxBody, r.Method, key)
+			return
+		}
 		if Cacheable(r.Method, r.Header, rec.statusCode, rec.Header()) {
 			c.Put(r.Method, key, rec.statusCode, rec.Header(), rec.body.Bytes())
 		}
 	}
 }
 
+// MaxRecorderBody is the largest response body the cache middleware will
+// buffer for inspection. Above this threshold the response still streams to
+// the client, but the entry is not cached.
+const MaxRecorderBody = 1 << 20 // 1 MiB
+
 // recorder buffers the response written by a handler so the middleware
 // can inspect status/body for caching, while still streaming bytes through
-// to the underlying writer.
+// to the underlying writer. Once the buffer exceeds maxBody the recorder
+// switches to overflowed mode: bytes still pass through to the client, but
+// the buffer is dropped and Cacheable's caller skips Put.
 type recorder struct {
 	http.ResponseWriter
 	statusCode  int
 	headerWrote bool
 	body        bytes.Buffer
+	maxBody     int
+	overflowed  bool
 }
 
 func newRecorder(w http.ResponseWriter) *recorder {
-	return &recorder{ResponseWriter: w, statusCode: http.StatusOK}
+	return &recorder{
+		ResponseWriter: w,
+		statusCode:     http.StatusOK,
+		maxBody:        MaxRecorderBody,
+	}
 }
 
 func (r *recorder) WriteHeader(code int) {
@@ -84,6 +102,13 @@ func (r *recorder) Write(p []byte) (int, error) {
 	if !r.headerWrote {
 		r.WriteHeader(http.StatusOK)
 	}
-	r.body.Write(p)
+	if !r.overflowed {
+		if r.body.Len()+len(p) > r.maxBody {
+			r.overflowed = true
+			r.body.Reset()
+		} else {
+			r.body.Write(p)
+		}
+	}
 	return r.ResponseWriter.Write(p)
 }

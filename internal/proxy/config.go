@@ -8,9 +8,10 @@ import (
 )
 
 type Route struct {
-	Path       string `yaml:"path"`
-	Host       string `yaml:"host"`
-	TargetPath string `yaml:"target_path"`
+	Path               string `yaml:"path"`
+	Host               string `yaml:"host"`
+	TargetPath         string `yaml:"target_path"`
+	InsecureSkipVerify bool   `yaml:"insecure_skip_verify"`
 }
 
 type ServerConfig struct {

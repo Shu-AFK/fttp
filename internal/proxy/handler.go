@@ -1,14 +1,10 @@
 package proxy
 
 import (
-	"bytes"
-	"crypto/tls"
-	"crypto/x509"
 	"io"
 	"net"
 	"net/http"
-	"os"
-	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,17 +13,23 @@ import (
 )
 
 func (p *Proxy) NotFoundHandler(w http.ResponseWriter, r *http.Request) {
+	body := []byte("Not Found")
 	p.Log(logging.LogLevelWarn, "Not Found: %s %s", r.Method, r.URL.Path)
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 	w.WriteHeader(http.StatusNotFound)
-	if _, err := w.Write([]byte("Not Found")); err != nil {
+	if _, err := w.Write(body); err != nil {
 		p.Log(logging.LogLevelError, "Response writer failed in NotFoundHandler: %s", err)
 	}
 }
 
 func (p *Proxy) MethodNotAllowedHandler(w http.ResponseWriter, r *http.Request) {
+	body := []byte("Method Not Allowed")
 	p.Log(logging.LogLevelWarn, "Method Not Allowed: %s %s", r.Method, r.URL.Path)
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 	w.WriteHeader(http.StatusMethodNotAllowed)
-	if _, err := w.Write([]byte("Method Not Allowed")); err != nil {
+	if _, err := w.Write(body); err != nil {
 		p.Log(logging.LogLevelError, "Response writer failed in MethodNotAllowedHandler: %s", err)
 	}
 }
@@ -71,46 +73,6 @@ func stripHopHeaders(h http.Header) {
 	for _, name := range hopHeaders {
 		h.Del(name)
 	}
-}
-
-// TODO: Finish — currently unused; kept for the planned switch from
-// InsecureSkipVerify to a real CA-rooted client.
-func (p *Proxy) loadSystemCAs() *x509.CertPool {
-	p.Log(logging.LogLevelDebug, "Loading system certificates")
-
-	if runtime.GOOS == "windows" {
-		certPool, err := x509.SystemCertPool()
-		if err != nil {
-			p.Log(logging.LogLevelError, "Failed to load system CA certificates on Windows: %v", err)
-			return nil
-		}
-		p.Log(logging.LogLevelDebug, "System certificate pool loaded on Windows")
-		return certPool
-	}
-
-	systemCerts, err := os.ReadFile("/etc/ssl/certs/ca-certificates.crt")
-	if err != nil {
-		if os.IsNotExist(err) {
-			p.Log(logging.LogLevelError, "System CA cert file not found, please ensure your system has CA certificates installed.")
-		} else {
-			p.Log(logging.LogLevelError, "Failed to load system CA certificates: %v", err)
-		}
-		return nil
-	}
-
-	certPool := x509.NewCertPool()
-	if ok := certPool.AppendCertsFromPEM(systemCerts); !ok {
-		p.Log(logging.LogLevelError, "Failed to append system CA certificates")
-		return nil
-	}
-
-	if len(certPool.Subjects()) == 0 {
-		p.Log(logging.LogLevelError, "Loaded certificate pool is empty")
-		return nil
-	}
-
-	p.Log(logging.LogLevelDebug, "Successfully loaded system CA certificates")
-	return certPool
 }
 
 func (p *Proxy) ReverseProxyHandler(w http.ResponseWriter, r *http.Request) {
@@ -184,15 +146,7 @@ func (p *Proxy) ReverseProxyHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	client := &http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: true,
-			},
-		},
-	}
-
-	resp, err := client.Do(req)
+	resp, err := forwardRoute.Client.Do(req)
 	if err != nil {
 		p.Log(logging.LogLevelError, "Request forwarding failed in ReverseProxyHandler: %v", err)
 		status = http.StatusBadGateway
@@ -211,13 +165,8 @@ func (p *Proxy) ReverseProxyHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(resp.StatusCode)
 	p.Log(logging.LogLevelDebug, "Received status code: %d", resp.StatusCode)
 
-	var buffer bytes.Buffer
-	if _, err = io.Copy(&buffer, resp.Body); err != nil {
-		p.Log(logging.LogLevelError, "Response body copy failed in ReverseProxyHandler: %v", err)
-		return
-	}
-	if _, err = w.Write(buffer.Bytes()); err != nil {
-		p.Log(logging.LogLevelError, "Response writer failed in ReverseProxyHandler: %v", err)
+	if _, err = io.Copy(w, resp.Body); err != nil {
+		p.Log(logging.LogLevelError, "Response body stream failed in ReverseProxyHandler: %v", err)
 		return
 	}
 

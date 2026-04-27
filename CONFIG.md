@@ -8,6 +8,7 @@ Here is a breakdown of what each segment means in the configuration file:
     - **path**: The incoming path to match.
     - **host**: The domain name or IP address and port of the backend server.
     - **target_path**: The path on the backend server to redirect to.
+    - **insecure_skip_verify**: (optional, default `false`) Skip TLS certificate verification when forwarding to an `https://` upstream on this route. Use only for local/dev backends with self-signed certs.
 
 - **add_header**: Define any additional headers that should be included in all responses from the proxy. The field name should be the header name, and the value should be an array of header values.
 
